@@ -1,0 +1,171 @@
+"""Tests for the ZoneMinder data models."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from aiozoneminder.models import Event, Monitor, MonitorStatus
+
+from .fixtures import event as make_event, monitor as make_monitor
+
+
+def test_monitor_derives_function_from_split_fields() -> None:
+    """ZoneMinder 1.39 reports a stale Function; the split fields are the truth."""
+    # The live server reports function="Monitor" for this exact combination.
+    data = make_monitor(1, "Driveway", analysing="None", recording="Always")
+    data["function"] = "Monitor"
+
+    parsed = Monitor.from_v3_dict(data)
+
+    assert parsed.function == "Record"
+    assert parsed.is_recording is True
+    assert parsed.is_analysing is False
+    assert parsed.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("capturing", "analysing", "recording", "expected"),
+    [
+        ("None", "None", "None", "None"),
+        ("Always", "None", "None", "Monitor"),
+        ("Always", "Always", "None", "Modect"),
+        ("Always", "None", "Always", "Record"),
+        ("Always", "Always", "OnMotion", "Mocord"),
+    ],
+)
+def test_function_matrix(
+    capturing: str, analysing: str, recording: str, expected: str
+) -> None:
+    """Every combination of the three state fields maps to a legacy mode."""
+    parsed = Monitor.from_v3_dict(
+        make_monitor(
+            1, "x", capturing=capturing, analysing=analysing, recording=recording
+        )
+    )
+    assert parsed.function == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "label", "degrees"),
+    [
+        ("Rotate0", "Normal", 0),
+        ("Rotate90", "Rotate right", 90),
+        ("Rotate270", "Rotate left", 270),
+        ("FlipHori", "Flipped horizontally", 0),
+        # ZoneMinder 1.36 spelling.
+        ("ROTATE_180", "Inverted", 180),
+        (None, "Normal", 0),
+    ],
+)
+def test_orientation(raw: str | None, label: str, degrees: int) -> None:
+    """Orientation uses ZoneMinder 1.39's spelling, not the 1.36 one."""
+    parsed = Monitor.from_v3_dict(make_monitor(1, "x", orientation=raw or "Rotate0"))
+    parsed.orientation = raw
+    assert parsed.orientation_label == label
+    assert parsed.orientation_degrees == degrees
+
+
+def test_legacy_monitor_expands_function() -> None:
+    """A 1.36 monitor with only Function still yields the split fields."""
+    parsed = Monitor.from_dict(
+        {
+            "Monitor": {
+                "Id": "4",
+                "Name": "Shed",
+                "Function": "Modect",
+                "Type": "Ffmpeg",
+                "Width": "1280",
+                "Height": "720",
+                "Enabled": "1",
+            }
+        }
+    )
+    assert parsed.capturing == "Always"
+    assert parsed.analysing == "Always"
+    assert parsed.is_analysing is True
+    assert parsed.function == "Mocord"
+
+
+def test_event_timestamps_are_timezone_aware() -> None:
+    """A naive timestamp would make a TIMESTAMP sensor invalid."""
+    parsed = Event.from_v3_dict(make_event(1, 1))
+    assert parsed.start_time.tzinfo is not None
+    assert parsed.start_time == datetime(2026, 8, 22, 13, 44, 52, tzinfo=UTC)
+
+
+def test_legacy_event_timestamp_gets_local_timezone() -> None:
+    """The legacy API returns naive local times, which need anchoring."""
+    parsed = Event.from_dict(
+        {
+            "Event": {
+                "Id": "9",
+                "MonitorId": "1",
+                "Name": "Event",
+                "Cause": "Motion",
+                "StartTime": "2026-08-22 13:44:52",
+                "EndTime": "",
+                "Length": "12.5",
+                "Frames": "125",
+                "AlarmFrames": "9",
+            }
+        }
+    )
+    assert parsed.start_time.tzinfo is not None
+    assert parsed.end_time is None
+    assert parsed.in_progress is True
+    assert parsed.is_alarm is True
+
+
+def test_continuous_event_is_not_motion() -> None:
+    """Continuous recording opens events constantly; none of them are motion."""
+    parsed = Event.from_v3_dict(make_event(1, 1, cause="Continuous", alarm_frames=0))
+    assert parsed.is_alarm is False
+
+
+def test_motion_event_is_motion() -> None:
+    """An event with alarmed frames is motion."""
+    parsed = Event.from_v3_dict(make_event(1, 2, cause="Motion", alarm_frames=17))
+    assert parsed.is_alarm is True
+    assert parsed.max_score == 42
+
+
+def test_event_without_finished_video_is_not_playable() -> None:
+    """An event still being written has nothing to play yet."""
+    parsed = Event.from_v3_dict(
+        make_event(1, 1, end=None, default_video="incomplete.h264.mp4")
+    )
+    assert parsed.in_progress is True
+    assert parsed.has_video is False
+
+
+def test_event_tolerates_null_disk_space() -> None:
+    """In-progress events report a null disk_space."""
+    raw = make_event(1, 1)
+    raw["disk_space"] = None
+    assert Event.from_v3_dict(raw).disk_space is None
+
+
+def test_event_requires_a_start_time() -> None:
+    """An event with no start time cannot be placed on a timeline."""
+    raw = make_event(1, 1)
+    raw["start_date_time"] = None
+    with pytest.raises(ValueError, match="start time"):
+        Event.from_v3_dict(raw)
+
+
+def test_monitor_status_parses_string_numbers() -> None:
+    """zm-api returns the frame rates as strings."""
+    parsed = MonitorStatus.from_v3_dict(
+        {
+            "monitor_id": 1,
+            "status": "Connected",
+            "capture_fps": "10.94",
+            "analysis_fps": "0.00",
+            "capture_bandwidth": 1474209,
+            "updated_on": "2026-08-22T13:52:54+00:00",
+        }
+    )
+    assert parsed.capture_fps == pytest.approx(10.94)
+    assert parsed.connected is True
