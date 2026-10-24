@@ -126,14 +126,45 @@ async def test_failed_refresh_logs_in_again(
     assert len(calls(mocked, "POST", "api/v3/auth/login")) == 2
 
 
-async def test_two_rejections_give_up(
-    client: ZoneMinderV3Client, mocked: aioresponses
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the client's sleeps instead of waiting."""
+    delays: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("aiozoneminder.client.v3.asyncio.sleep", _sleep)
+    return delays
+
+
+async def test_three_rejections_give_up(
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
 ) -> None:
     register_login(mocked)
     mocked.get(url("api/v3/host/getVersion"), status=401, repeat=True)
     mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
     with pytest.raises(ZMAuthenticationError):
         await client.get_version()
+    assert len(calls(mocked, "GET", "api/v3/host/getVersion")) == 3
+    assert slept == [1.0]
+
+
+async def test_token_renewed_in_the_logout_second_is_renewed_again(
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
+) -> None:
+    # A logout elsewhere revokes tokens issued before the next second, so the
+    # token from the first re-login is refused too.
+    register_login(mocked)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
+    mocked.get(url("api/v3/host/getVersion"), status=401)
+    mocked.get(url("api/v3/host/getVersion"), status=401)
+    mocked.get(url("api/v3/host/getVersion"), payload={"version": "1.39.41"})
+
+    assert await client.get_version() == "1.39.41"
+    assert slept == [1.0]
+    # The first login, one after each refusal.
+    assert len(calls(mocked, "POST", "api/v3/auth/login")) == 3
 
 
 async def test_token_near_expiry_is_refreshed_first(
