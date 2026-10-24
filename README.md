@@ -104,3 +104,5 @@ way through ZoneMinder's API v2 quirks.
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+Contributions need a signed [CLA](CLA.md); see [CONTRIBUTING](CONTRIBUTING.md).
