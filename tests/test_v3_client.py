@@ -38,6 +38,14 @@ def bearer(call: Any) -> str | None:
     return (call.kwargs.get("headers") or {}).get("Authorization")
 
 
+def register_fresh_token(mocked: aioresponses) -> None:
+    """Answer a token refresh with a new access token."""
+    mocked.post(
+        f"{HOST}/api/v3/auth/refresh",
+        payload={"access_token": "fresh-token", "expire_in": 600},
+    )
+
+
 # -- Logging in ---------------------------------------------------------------
 
 
@@ -535,10 +543,29 @@ async def test_event_stream_refused(
     client: ZoneMinderV3Client, mocked: aioresponses
 ) -> None:
     register_login(mocked)
-    mocked.get(url("api/v3/events/stream"), status=401)
+    mocked.get(url("api/v3/events/stream"), status=401, repeat=True)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401)
     with pytest.raises(ZMAuthenticationError):
         async for _message in client.async_event_stream():
             pass
+    # The token was renewed and the stream asked for once more.
+    assert len(calls(mocked, "GET", "api/v3/events/stream")) == 2
+
+
+async def test_event_stream_after_the_token_is_revoked(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    register_fresh_token(mocked)
+    mocked.get(url("api/v3/events/stream"), status=401)
+    mocked.get(url("api/v3/events/stream"), body=STREAM)
+
+    received = [message async for message in client.async_event_stream()]
+
+    assert len(received) == 2
+    assert bearer(calls(mocked, "GET", "api/v3/events/stream")[-1]) == (
+        "Bearer fresh-token"
+    )
 
 
 # -- WebRTC (WHEP) ------------------------------------------------------------
@@ -599,6 +626,23 @@ async def test_whep_offer_refused(
     mocked.post(url(WHEP), status=status, body="I'm a teapot")
     with pytest.raises(ZMApiError, match=message):
         await client.async_whep_offer(1, "v=0")
+
+
+async def test_whep_after_the_token_is_revoked(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    register_fresh_token(mocked)
+    mocked.post(url(WHEP), status=401)
+    mocked.post(url(WHEP), status=201, body="v=0", headers={"Location": SESSION})
+    mocked.patch(f"{HOST}{SESSION}", status=401)
+    mocked.patch(f"{HOST}{SESSION}", status=204)
+
+    assert await client.async_whep_offer(1, "v=0") == ("v=0", SESSION)
+    await client.async_whep_candidate(SESSION, "0", "candidate:1")
+
+    assert bearer(calls(mocked, "POST", WHEP)[-1]) == "Bearer fresh-token"
+    assert len(calls(mocked, "PATCH", SESSION.lstrip("/"))) == 2
 
 
 async def test_whep_answer_without_a_session(
@@ -749,6 +793,39 @@ async def test_media_is_streamed_with_the_token(
     (request,) = calls(mocked, "GET", path)
     assert bearer(request) == "Bearer access-token"
     assert request.kwargs["headers"]["Range"] == "bytes=0-"
+
+
+async def test_media_after_the_token_is_revoked(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    # A logout elsewhere on the account revokes the token before it expires.
+    register_login(mocked)
+    register_fresh_token(mocked)
+    path = client.get_event_media_path(298)
+    mocked.get(url(path), status=401)
+    mocked.get(url(path), body=b"mp4 bytes")
+
+    async with client.async_stream_media(path, headers={"Range": "bytes=0-"}) as resp:
+        assert resp.status == 200
+        assert await resp.read() == b"mp4 bytes"
+
+    first, second = calls(mocked, "GET", path)
+    assert bearer(first) == "Bearer access-token"
+    assert bearer(second) == "Bearer fresh-token"
+    assert second.kwargs["headers"]["Range"] == "bytes=0-"
+
+
+async def test_media_refused_twice_is_passed_on(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401)
+    path = client.get_event_media_path(298)
+    mocked.get(url(path), status=401, repeat=True)
+
+    async with client.async_stream_media(path) as resp:
+        assert resp.status == 401
+    assert len(calls(mocked, "GET", path)) == 2
 
 
 def test_media_paths(client: ZoneMinderV3Client) -> None:

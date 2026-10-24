@@ -59,6 +59,7 @@ from ..exceptions import (
     ZMApiError,
     ZMAuthenticationError,
     ZMConnectionError,
+    ZMError,
     ZMNotFoundError,
     ZMNotSupportedError,
 )
@@ -154,7 +155,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._refresh_token = result.get("refresh_token") or self._refresh_token
         expires_in = result.get("expire_in")
         if isinstance(expires_in, (int, float)) and expires_in > 0:
-            self._token_expires = datetime.now() + timedelta(seconds=expires_in)
+            self._token_expires = datetime.now(UTC) + timedelta(seconds=expires_in)
         else:
             self._token_expires = None
 
@@ -210,7 +211,10 @@ class ZoneMinderV3Client(ZoneMinderClient):
         if not self._authenticated or not self._access_token:
             await self.authenticate()
             return
-        if self._token_expires and datetime.now() >= self._token_expires - _TOKEN_SKEW:
+        if (
+            self._token_expires
+            and datetime.now(UTC) >= self._token_expires - _TOKEN_SKEW
+        ):
             _LOGGER.debug("Access token near expiry, refreshing")
             if not await self._refresh():
                 await self.authenticate()
@@ -274,6 +278,34 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 raise ZMConnectionError(f"Request to {endpoint} failed: {err}") from err
 
         raise ZMApiError(f"Request to {endpoint} did not complete")
+
+    @asynccontextmanager
+    async def _async_open(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Yield the raw response to a request that carries the token.
+
+        A 401 means zm-api revoked the token (a logout or password change
+        elsewhere on the account), so the token is renewed and the request
+        sent once more, as :meth:`_request` does. The caller checks the status.
+        """
+        for attempt in (1, 2):
+            async with self._session.request(
+                method,
+                url,
+                headers={**(headers or {}), **self._auth_headers()},
+                ssl=self._verify_ssl,
+                **kwargs,
+            ) as response:
+                if response.status != 401 or attempt == 2:
+                    yield response
+                    return
+            if not await self._refresh():
+                await self.authenticate()
 
     async def _paginate(self, endpoint: str, **params: Any) -> list[dict[str, Any]]:
         """Collect every page of a paginated collection endpoint."""
@@ -622,16 +654,15 @@ class ZoneMinderV3Client(ZoneMinderClient):
         off. Raises ZMNotFoundError on servers without the stream.
         """
         await self._async_ensure_token()
-        headers = {**self._auth_headers(), "Accept": "text/event-stream"}
         params = {"since": str(since)} if since is not None else None
-        async with self._session.get(
+        async with self._async_open(
+            "GET",
             self._build_url(V3_EVENT_STREAM),
-            headers=headers,
+            headers={"Accept": "text/event-stream"},
             params=params,
             # No overall limit; a silent minute means the link is dead, since
             # the server sends a heartbeat every 15 seconds.
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=60),
-            ssl=self._verify_ssl,
         ) as response:
             # Older servers route /events/stream to /events/{id} and reject
             # "stream" as an id (400 or 422) rather than answering 404.
@@ -676,12 +707,12 @@ class ZoneMinderV3Client(ZoneMinderClient):
             return self._whep_supported
         await self._async_ensure_token()
         try:
-            async with self._session.post(
+            async with self._async_open(
+                "POST",
                 self._build_url(V3_LIVE_WHEP.format(monitor_id=monitor_id)),
-                headers={**self._auth_headers(), "Content-Type": "text/plain"},
+                headers={"Content-Type": "text/plain"},
                 data=b"",
                 timeout=self._timeout,
-                ssl=self._verify_ssl,
             ) as response:
                 self._whep_supported = response.status in (400, 415)
         except (aiohttp.ClientError, TimeoutError) as err:
@@ -698,12 +729,12 @@ class ZoneMinderV3Client(ZoneMinderClient):
         """Send a browser's SDP offer; return (answer SDP, session URL)."""
         await self._async_ensure_token()
         try:
-            async with self._session.post(
+            async with self._async_open(
+                "POST",
                 self._build_url(V3_LIVE_WHEP.format(monitor_id=monitor_id)),
-                headers={**self._auth_headers(), "Content-Type": "application/sdp"},
+                headers={"Content-Type": "application/sdp"},
                 data=offer_sdp.encode(),
                 timeout=self._timeout,
-                ssl=self._verify_ssl,
             ) as response:
                 body = await response.text()
                 if response.status != 201:
@@ -738,15 +769,12 @@ class ZoneMinderV3Client(ZoneMinderClient):
         lines.append(f"a={candidate}" if not candidate.startswith("a=") else candidate)
         await self._async_ensure_token()
         try:
-            async with self._session.patch(
+            async with self._async_open(
+                "PATCH",
                 self._whep_session_url(location),
-                headers={
-                    **self._auth_headers(),
-                    "Content-Type": "application/trickle-ice-sdpfrag",
-                },
+                headers={"Content-Type": "application/trickle-ice-sdpfrag"},
                 data=("\r\n".join(lines) + "\r\n").encode(),
                 timeout=self._timeout,
-                ssl=self._verify_ssl,
             ) as response:
                 if response.status >= 400:
                     _LOGGER.debug(
@@ -760,14 +788,11 @@ class ZoneMinderV3Client(ZoneMinderClient):
     async def async_whep_close(self, location: str) -> None:
         """End a WebRTC session."""
         try:
-            async with self._session.delete(
-                self._whep_session_url(location),
-                headers=self._auth_headers(),
-                timeout=self._timeout,
-                ssl=self._verify_ssl,
+            async with self._async_open(
+                "DELETE", self._whep_session_url(location), timeout=self._timeout
             ):
                 pass
-        except (aiohttp.ClientError, TimeoutError) as err:
+        except (aiohttp.ClientError, TimeoutError, ZMError) as err:
             _LOGGER.debug("Closing WebRTC session %s failed: %s", location, err)
 
     async def async_get_rtsp_url(self, monitor_id: int) -> str | None:
@@ -913,15 +938,13 @@ class ZoneMinderV3Client(ZoneMinderClient):
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """Yield an authenticated upstream response for a media path."""
         await self._async_ensure_token()
-        url = self._build_url(path)
-        request_headers = {**(headers or {}), **self._auth_headers()}
-        async with self._session.get(
-            url,
-            headers=request_headers,
+        async with self._async_open(
+            "GET",
+            self._build_url(path),
+            headers=headers,
             timeout=aiohttp.ClientTimeout(
                 total=None, sock_connect=DEFAULT_TIMEOUT, sock_read=LONG_TIMEOUT
             ),
-            ssl=self._verify_ssl,
             allow_redirects=False,
         ) as response:
             yield response
