@@ -214,6 +214,45 @@ async def test_reauthenticates_once_on_401(client: ZoneMinderLegacyClient) -> No
         assert await client.get_version() == "1.36.33"
 
 
+async def test_permission_refusal_is_not_a_login_failure(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A 401 that survives a fresh login is the user's permissions, not reauth.
+
+    ZoneMinder answers 401 "Insufficient privileges" to a user without System
+    or Events view. Raising ZMAuthenticationError sent HA into reauth for a
+    login that works.
+    """
+    refused = {
+        "success": False,
+        "data": {
+            "name": "Insufficient privileges",
+            "message": "Insufficient privileges",
+        },
+    }
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/configs\.json"), status=401, payload=refused, repeat=True)
+        with pytest.raises(ZMApiError, match="Insufficient privileges") as err:
+            await client.get_configs()
+        assert len(sent(mocked, "POST", "api/host/login.json")) == 2
+
+    assert not isinstance(err.value, ZMAuthenticationError)
+    assert client.authenticated
+
+
+async def test_failed_relogin_is_still_an_auth_error(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """When the fresh login itself is rejected, it stays ZMAuthenticationError."""
+    with aioresponses() as mocked:
+        mocked.post(f"{ZM}/api/host/login.json", payload={"access_token": "token"})
+        mocked.post(f"{ZM}/api/host/login.json", status=401)
+        mocked.get(v2(r"api/configs\.json"), status=401)
+        with pytest.raises(ZMAuthenticationError):
+            await client.get_configs()
+
+
 def _event(event_id: int, start: str) -> dict[str, Any]:
     """Build an API v2 event."""
     return {
