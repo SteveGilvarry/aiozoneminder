@@ -303,9 +303,10 @@ class ZoneMinderV3Client(ZoneMinderClient):
 
         A 401 means zm-api revoked the token (a logout or password change
         elsewhere on the account), so the token is renewed and the request
-        sent once more, as :meth:`_request` does. The caller checks the status.
+        sent again, as :meth:`_request` does, including its second renewal
+        after the logout second. The caller checks the status.
         """
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             async with self._session.request(
                 method,
                 url,
@@ -313,9 +314,11 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 ssl=self._verify_ssl,
                 **kwargs,
             ) as response:
-                if response.status != 401 or attempt == 2:
+                if response.status != 401 or attempt == 3:
                     yield response
                     return
+            if attempt == 2:
+                await asyncio.sleep(_REVOKED_RETRY_DELAY)
             if not await self._refresh():
                 await self.authenticate()
 
