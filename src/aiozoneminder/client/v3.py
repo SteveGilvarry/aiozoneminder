@@ -80,6 +80,9 @@ _LOGGER = logging.getLogger(__name__)
 _PAGE_SIZE = 500
 #: Refresh the access token this long before it actually expires.
 _TOKEN_SKEW = timedelta(seconds=60)
+#: zm-api revokes tokens issued before the second after a logout, so a token
+#: renewed within that second is refused too. Wait this long, then renew again.
+_REVOKED_RETRY_DELAY = 1.0
 #: A live session is re-armed if we have not touched it for this long.
 _LIVE_SESSION_TTL = timedelta(minutes=2)
 #: How long to wait for a new live session to publish its first segment.
@@ -234,7 +237,13 @@ class ZoneMinderV3Client(ZoneMinderClient):
     async def _request(
         self, method: str, endpoint: str, timeout: int | None = None, **kwargs: Any
     ) -> Any:
-        """Make an authenticated JSON request, retrying once after a refresh."""
+        """Make an authenticated JSON request, retrying after a refresh.
+
+        A 401 renews the token and retries. If the new token is refused too,
+        it was renewed in the same second as a logout elsewhere on the
+        account, so the client waits a second, renews again and retries once
+        more.
+        """
         await self._async_ensure_token()
 
         url = self._build_url(endpoint)
@@ -242,8 +251,9 @@ class ZoneMinderV3Client(ZoneMinderClient):
             aiohttp.ClientTimeout(total=timeout) if timeout else self._timeout
         )
 
-        for attempt in (1, 2):
-            headers = {**kwargs.pop("headers", {}), **self._auth_headers()}
+        extra_headers = kwargs.pop("headers", {})
+        for attempt in (1, 2, 3):
+            headers = {**extra_headers, **self._auth_headers()}
             try:
                 async with self._session.request(
                     method,
@@ -254,10 +264,12 @@ class ZoneMinderV3Client(ZoneMinderClient):
                     **kwargs,
                 ) as response:
                     if response.status == 401:
-                        if attempt == 2:
+                        if attempt == 3:
                             raise ZMAuthenticationError(
                                 "Authentication failed after refreshing the token"
                             )
+                        if attempt == 2:
+                            await asyncio.sleep(_REVOKED_RETRY_DELAY)
                         if not await self._refresh():
                             await self.authenticate()
                         continue
