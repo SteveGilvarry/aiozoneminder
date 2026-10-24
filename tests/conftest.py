@@ -107,9 +107,22 @@ def register_zm_api(mocked: aioresponses) -> None:
         if (start := request_url.query.get("start_time")) is not None:
             selected = [e for e in selected if e["start_date_time"] >= start]
         if (end := request_url.query.get("end_time")) is not None:
-            selected = [e for e in selected if e["start_date_time"] < end]
+            # zm-api compares the end, so an event still recording never matches.
+            selected = [
+                e
+                for e in selected
+                if e["end_date_time"] is not None and e["end_date_time"] <= end
+            ]
+        selected = sorted(
+            selected,
+            key=lambda e: (e["start_date_time"], e["id"]),
+            reverse=request_url.query.get("direction") != "asc",
+        )
         limit = int(request_url.query.get("page_size", 100))
-        return CallbackResult(payload=paginated(selected[:limit]))
+        page = int(request_url.query.get("page", 1))
+        payload = paginated(selected[(page - 1) * limit : page * limit])
+        payload["last_page"] = max(1, -(-len(selected) // limit))
+        return CallbackResult(payload=payload)
 
     mocked.get(url("api/v3/events"), callback=_events, repeat=True)
     mocked.get(url(r"api/v3/event-summaries/\d+"), payload=EVENT_SUMMARY, repeat=True)

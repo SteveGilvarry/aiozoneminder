@@ -499,27 +499,45 @@ class ZoneMinderV3Client(ZoneMinderClient):
         end: datetime,
         limit: int = 500,
     ) -> list[Event]:
-        """Return a monitor's events that started inside a time window."""
-        response = await self._request(
-            "GET",
-            V3_EVENTS,
-            params={
-                "page": 1,
-                "page_size": limit,
-                "monitor_id": monitor_id,
-                "start_time": _iso8601(start),
-                "end_time": _iso8601(end),
-                "sort": "start_time",
-                "direction": "desc",
-            },
-        )
-        events = []
-        for item in response.get("items") or []:
-            try:
-                events.append(Event.from_v3_dict(item))
-            except (KeyError, ValueError, TypeError) as err:
-                _LOGGER.debug("Skipping unparsable event: %s", err)
-        return events
+        """Return a monitor's events that started inside a time window.
+
+        zm-api's ``end_time`` filter is on the event's end, which drops events
+        still recording. So only the start is sent, events are read oldest
+        first until one starts after the window, and the end is applied here.
+        The newest ``limit`` are returned, newest first.
+        """
+        events: list[Event] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                V3_EVENTS,
+                params={
+                    "page": page,
+                    "page_size": limit,
+                    "monitor_id": monitor_id,
+                    "start_time": _iso8601(start),
+                    "sort": "start_time",
+                    "direction": "asc",
+                },
+            )
+            batch = response.get("items") or []
+            past_end = False
+            for item in batch:
+                try:
+                    event = Event.from_v3_dict(item)
+                except (KeyError, ValueError, TypeError) as err:
+                    _LOGGER.debug("Skipping unparsable event: %s", err)
+                    continue
+                if event.start_time >= end:
+                    past_end = True
+                    break
+                events.append(event)
+            if past_end or not batch or page >= (response.get("last_page") or 1):
+                break
+            page += 1
+        events.reverse()
+        return events[:limit]
 
     async def get_event_summary(self, monitor_id: int) -> EventSummary | None:
         """Return event counts and disk usage for a monitor."""
