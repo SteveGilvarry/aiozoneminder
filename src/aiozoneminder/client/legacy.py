@@ -479,7 +479,10 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
 
     async def get_event(self, event_id: int) -> Event:
         """Return a single event."""
-        response = await self._request("GET", API_EVENT.format(event_id=event_id))
+        # Without noframes the reply carries every Frame row of the event.
+        response = await self._request(
+            "GET", API_EVENT.format(event_id=event_id), params={"noframes": "true"}
+        )
         return Event.from_dict(response.get("event", response), self._timezone)
 
     # -- Alarm and PTZ -------------------------------------------------------
