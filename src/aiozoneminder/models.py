@@ -14,6 +14,19 @@ from typing import Any
 from .const import ORIENTATION_DEGREES, ORIENTATION_LABELS
 
 
+def _legacy_end(raw: dict[str, Any]) -> Any:
+    """Return an API v2 event's end time, or None while it is still recording.
+
+    From ZoneMinder 1.37 ``EndDateTime`` is the stored end, null while the
+    event runs. ``EndTime`` is then a computed field that reads as the current
+    time for an open event, so it only counts on older servers, where it is
+    the stored column and ``EndDateTime`` does not exist.
+    """
+    if "EndDateTime" in raw:
+        return raw["EndDateTime"]
+    return raw.get("EndTime")
+
+
 def _parse_datetime(value: Any, tz: tzinfo | None = None) -> datetime | None:
     """Parse a ZoneMinder timestamp into a timezone-aware ``datetime``.
 
@@ -351,7 +364,7 @@ class Event:
             name=raw.get("Name") or "",
             cause=raw.get("Cause") or "",
             start_time=start_time,
-            end_time=_parse_datetime(raw.get("EndTime") or raw.get("EndDateTime"), tz),
+            end_time=_parse_datetime(_legacy_end(raw), tz),
             length=_to_float(raw.get("Length")),
             frames=_to_int(raw.get("Frames")),
             alarm_frames=_to_int(raw.get("AlarmFrames")),

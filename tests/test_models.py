@@ -118,6 +118,34 @@ def test_legacy_event_timestamp_gets_local_timezone() -> None:
     assert parsed.is_alarm is True
 
 
+def test_open_legacy_event_is_in_progress() -> None:
+    """ZoneMinder 1.37+ fills EndTime with the current time while recording.
+
+    EndDateTime is null until the event closes, and that is what counts.
+    """
+    raw = {
+        "Event": {
+            "Id": 17,
+            "MonitorId": 3,
+            "Cause": "Forced Web",
+            "StartTime": "2026-10-24 05:23:49",
+            "StartDateTime": "2026-10-24 05:23:49",
+            "EndTime": "2026-10-24 05:23:53",
+            "EndDateTime": None,
+            "AlarmFrames": 1,
+        }
+    }
+    parsed = Event.from_dict(raw, UTC)
+    assert parsed.end_time is None
+    assert parsed.in_progress is True
+
+    raw["Event"]["EndDateTime"] = "2026-10-24 05:24:03"
+    raw["Event"]["EndTime"] = "2026-10-24 05:24:03"
+    closed = Event.from_dict(raw, UTC)
+    assert closed.in_progress is False
+    assert closed.end_time == datetime(2026, 10, 24, 5, 24, 3, tzinfo=UTC)
+
+
 def test_continuous_event_is_not_motion() -> None:
     """Continuous recording opens events constantly; none of them are motion."""
     parsed = Event.from_v3_dict(make_event(1, 1, cause="Continuous", alarm_frames=0))
