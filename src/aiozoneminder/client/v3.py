@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 import json
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -87,6 +88,10 @@ _TOKEN_SKEW = timedelta(seconds=60)
 _REVOKED_RETRY_DELAY = 1.0
 #: A live session is re-armed if we have not touched it for this long.
 _LIVE_SESSION_TTL = timedelta(minutes=2)
+#: zm-api reaps a session nobody has read for 90 s. When a live playlist is
+#: gone, the session is started again, but no more often than this.
+_LIVE_RESTART_INTERVAL = timedelta(seconds=30)
+_LIVE_PLAYLIST = re.compile(r"api/v3/live/(\d+)/hls/[^/?]+\.m3u8(?:\?|$)")
 #: How long to wait for a new live session to publish its first segment.
 _FIRST_SEGMENT_TIMEOUT = 10.0
 _FIRST_SEGMENT_POLL = 0.5
@@ -139,6 +144,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._refresh_token: str | None = None
         self._token_expires: datetime | None = None
         self._live_sessions: dict[int, datetime] = {}
+        self._live_restarts: dict[int, datetime] = {}
         self._rtsp_links: dict[int, tuple[str, datetime]] = {}
         self._rtsp_unavailable_until: datetime | None = None
         self._whep_supported: bool | None = None
@@ -233,6 +239,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._refresh_token = None
         self._token_expires = None
         self._live_sessions.clear()
+        self._live_restarts.clear()
         self._rtsp_links.clear()
         self._whep_supported = None
 
@@ -682,11 +689,16 @@ class ZoneMinderV3Client(ZoneMinderClient):
 
         zm-api only materialises a monitor's playlist once a session is
         running, and sessions are reference counted server side, so we re-arm
-        ours periodically rather than on every frame request.
+        ours periodically rather than on every frame request. A session zm-api
+        reaped in between is started again by :meth:`async_stream_media`.
         """
         last = self._live_sessions.get(monitor_id)
-        if last and datetime.now() - last < _LIVE_SESSION_TTL:
+        if last and datetime.now(UTC) - last < _LIVE_SESSION_TTL:
             return
+        await self._async_start_live(monitor_id)
+
+    async def _async_start_live(self, monitor_id: int) -> None:
+        """Start a monitor's live session and wait for its first segment."""
         try:
             await self._request(
                 "POST",
@@ -694,13 +706,27 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 json={"enable_hls": True, "enable_webrtc": True},
                 timeout=LONG_TIMEOUT,
             )
-            self._live_sessions[monitor_id] = datetime.now()
             _LOGGER.debug("Live session started for monitor %d", monitor_id)
-            await self._async_wait_for_first_segment(monitor_id)
-        except (ZMApiError, ZMConnectionError) as err:
+        except ZMApiError as err:
+            cause = err.__cause__
+            if not (
+                isinstance(cause, aiohttp.ClientResponseError) and cause.status == 409
+            ):
+                _LOGGER.warning(
+                    "Could not start a live session for monitor %d: %s",
+                    monitor_id,
+                    err,
+                )
+                return
+            # 409: the session is already running, which is all we need.
+            _LOGGER.debug("Live session already running for monitor %d", monitor_id)
+        except ZMConnectionError as err:
             _LOGGER.warning(
                 "Could not start a live session for monitor %d: %s", monitor_id, err
             )
+            return
+        self._live_sessions[monitor_id] = datetime.now(UTC)
+        await self._async_wait_for_first_segment(monitor_id)
 
     # -- Event stream ----------------------------------------------------------
 
@@ -911,7 +937,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         deadline = loop.time() + _FIRST_SEGMENT_TIMEOUT
         while True:
             try:
-                async with self.async_stream_media(path) as response:
+                async with self._async_get_media(path) as response:
                     if response.status == 200 and "#EXTINF" in await response.text():
                         return
             except (aiohttp.ClientError, TimeoutError) as err:
@@ -1000,7 +1026,34 @@ class ZoneMinderV3Client(ZoneMinderClient):
     async def async_stream_media(
         self, path: str, headers: dict[str, str] | None = None
     ) -> AsyncIterator[aiohttp.ClientResponse]:
-        """Yield an authenticated upstream response for a media path."""
+        """Yield an authenticated upstream response for a media path.
+
+        A live playlist that answers 404 belongs to a session zm-api reaped
+        for being idle, so the session is started again and the playlist
+        fetched once more.
+        """
+        async with self._async_get_media(path, headers) as response:
+            match = _LIVE_PLAYLIST.match(path.lstrip("/"))
+            if response.status != 404 or match is None:
+                yield response
+                return
+            monitor_id = int(match.group(1))
+            last = self._live_restarts.get(monitor_id)
+            now = datetime.now(UTC)
+            if last and now - last < _LIVE_RESTART_INTERVAL:
+                yield response
+                return
+            self._live_restarts[monitor_id] = now
+        _LOGGER.debug("Live session for monitor %d has ended, restarting", monitor_id)
+        await self._async_start_live(monitor_id)
+        async with self._async_get_media(path, headers) as response:
+            yield response
+
+    @asynccontextmanager
+    async def _async_get_media(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Yield the upstream response for a media path, carrying the token."""
         await self._async_ensure_token()
         async with self._async_open(
             "GET",

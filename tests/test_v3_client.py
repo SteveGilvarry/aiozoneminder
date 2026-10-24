@@ -22,7 +22,7 @@ from aiozoneminder import (
 )
 
 from .conftest import register_login, url
-from .fixtures import HOST, RUN_STATES, monitor, paginated
+from .fixtures import HOST, LIVE_PLAYLIST, RUN_STATES, monitor, paginated
 
 
 def calls(mocked: aioresponses, method: str, path: str) -> list[Any]:
@@ -902,6 +902,68 @@ async def test_live_session_is_started_once(
 
     (start,) = calls(zm_api, "POST", "api/v3/live/1/start")
     assert start.kwargs["json"] == {"enable_hls": True, "enable_webrtc": True}
+
+
+async def test_live_session_already_running_counts_as_started(
+    client: ZoneMinderV3Client,
+    zm_api: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # zm-api answers 409 when the monitor already has a session.
+    zm_api.post(url("api/v3/live/1/start"), status=409, repeat=True)
+
+    await client.async_prepare_live(1)
+    await client.async_prepare_live(1)
+
+    assert len(calls(zm_api, "POST", "api/v3/live/1/start")) == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+async def test_reaped_live_session_is_started_again(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    mocked.post(url("api/v3/live/1/start"), payload={"status": "started"}, repeat=True)
+    mocked.get(url(r"api/v3/live/1/hls/live\.m3u8"), body=LIVE_PLAYLIST, repeat=True)
+    master = client.get_live_media_path(1)
+    # zm-api reaped the idle session, so the playlist is gone until a restart.
+    mocked.get(url(master), status=404)
+    mocked.get(url(master), body="#EXTM3U\nlive.m3u8\n")
+
+    await client.async_prepare_live(1)
+    async with client.async_stream_media(master) as resp:
+        assert resp.status == 200
+
+    assert len(calls(mocked, "POST", "api/v3/live/1/start")) == 2
+    assert len(calls(mocked, "GET", master)) == 2
+
+
+async def test_live_restart_is_not_repeated_on_every_request(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    # A monitor that isn't capturing: no session can start.
+    register_login(mocked)
+    mocked.post(url("api/v3/live/1/start"), status=404, repeat=True)
+    master = client.get_live_media_path(1)
+    mocked.get(url(master), status=404, repeat=True)
+
+    for _ in range(3):
+        async with client.async_stream_media(master) as resp:
+            assert resp.status == 404
+
+    assert len(calls(mocked, "POST", "api/v3/live/1/start")) == 1
+
+
+async def test_missing_recording_does_not_start_a_live_session(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    path = client.get_event_media_path(298)
+    mocked.get(url(path), status=404)
+
+    async with client.async_stream_media(path) as resp:
+        assert resp.status == 404
+    assert calls(mocked, "POST", "api/v3/live/298/start") == []
 
 
 async def test_snapshot(client: ZoneMinderV3Client, mocked: aioresponses) -> None:
