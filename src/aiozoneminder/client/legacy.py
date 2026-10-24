@@ -94,6 +94,9 @@ _PTZ_NO_SPEED = {"home", "preset"}
 #: coordinator asks for them straight after the list, in the same poll.
 _MONITOR_LIST_TTL = 10.0
 
+#: The most events ZoneMinder returns per page (its paginator's maxLimit).
+_MAX_PAGE_SIZE = 100
+
 #: ZoneMinder 1.37 renamed the single Function field. Writing both keeps this
 #: backend working across 1.36 and 1.37+.
 _FUNCTION_FROM_STATE = {
@@ -463,19 +466,33 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             # The CakePHP API expresses filters as path segments.
             endpoint = f"api/events/index/MonitorId:{monitor_id}.json"
 
-        response = await self._request(
-            "GET",
-            endpoint,
-            params={"sort": "StartTime", "direction": "desc", "limit": limit},
-        )
-        events = []
-        for item in response.get("events") or []:
-            try:
-                events.append(Event.from_dict(item, self._timezone))
-            except (KeyError, ValueError, TypeError) as err:
-                _LOGGER.debug("Skipping unparsable event: %s", err)
-        events.sort(key=lambda event: event.start_time, reverse=True)
-        return events[:limit]
+        # ZoneMinder caps a page at 100 events, so larger limits take several.
+        params: dict[str, Any] = {
+            "sort": "StartTime",
+            "direction": "desc",
+            "limit": min(limit, _MAX_PAGE_SIZE),
+        }
+        events: dict[int, Event] = {}
+        page = 1
+        while True:
+            response = await self._request("GET", endpoint, params=params)
+            seen = len(events)
+            for item in response.get("events") or []:
+                try:
+                    event = Event.from_dict(item, self._timezone)
+                except (KeyError, ValueError, TypeError) as err:
+                    _LOGGER.debug("Skipping unparsable event: %s", err)
+                    continue
+                # A new event shifts the pages, so one can be seen twice.
+                events[event.id] = event
+            more = (response.get("pagination") or {}).get("nextPage")
+            # A page with nothing new (a server ignoring ``page``) ends it too.
+            if len(events) >= limit or not more or len(events) == seen:
+                break
+            page += 1
+            params["page"] = page
+        ordered = sorted(events.values(), key=lambda e: e.start_time, reverse=True)
+        return ordered[:limit]
 
     async def get_event(self, event_id: int) -> Event:
         """Return a single event."""

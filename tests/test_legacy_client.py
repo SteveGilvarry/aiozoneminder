@@ -271,6 +271,35 @@ async def test_event_is_read_without_its_frames(
     assert call.kwargs["params"] == {"noframes": "true", "token": "token"}
 
 
+async def test_events_page_past_the_server_cap(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """ZoneMinder returns at most 100 events a page; larger limits page through."""
+    newest = datetime(2026, 10, 24, 12, 0)
+
+    def _page(url: Any, **kwargs: Any) -> CallbackResult:
+        params = kwargs["params"]
+        # The server caps a page at 100, whatever limit asks for.
+        size, page = min(int(params["limit"]), 100), int(params.get("page", 1))
+        ids = range(250 - (page - 1) * size, max(250 - page * size, 0), -1)
+        events = [
+            _event(i, f"{newest - timedelta(minutes=250 - i):%Y-%m-%d %H:%M:%S}")
+            for i in ids
+        ]
+        pagination = {"page": page, "nextPage": page * size < 250}
+        return CallbackResult(payload={"events": events, "pagination": pagination})
+
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/events\.json"), callback=_page, repeat=True)
+        events = await client.get_events(limit=220)
+        assert len(sent(mocked, "GET", "api/events.json")) == 3
+        everything = await client.get_events(limit=1000)
+
+    assert [e.id for e in events] == list(range(250, 30, -1))  # Newest first.
+    assert len(everything) == 250
+
+
 async def test_run_states_switch_by_name(client: ZoneMinderLegacyClient) -> None:
     """API v2 applies a run state itself, so switching is one call."""
     with aioresponses() as mocked:
@@ -331,6 +360,25 @@ async def test_reads_without_v3_return_nothing(client: ZoneMinderLegacyClient) -
     """Reads API v2 can't do return empty results rather than failing."""
     assert await client.get_ptz_presets(1) == {}
     assert await client.async_get_rtsp_url(1) is None
+
+
+async def test_event_paging_stops_when_pages_repeat(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A server that ignores ``page`` but says there's more doesn't loop forever."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/events\.json"),
+            payload={
+                "events": [_event(1, "2026-10-24 09:00:00")],
+                "pagination": {"nextPage": True},
+            },
+            repeat=True,
+        )
+        events = await client.get_events(limit=500)
+        assert len(sent(mocked, "GET", "api/events.json")) == 2
+    assert [e.id for e in events] == [1]
 
 
 def v2(path: str) -> re.Pattern[str]:
