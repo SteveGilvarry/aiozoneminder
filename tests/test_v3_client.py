@@ -360,9 +360,12 @@ async def test_saving_a_new_run_state_creates_it(
     zm_api.post(url("api/v3/states"), payload={})
     await client.save_run_state("Holiday", "1:Always:Always:Always")
     (post,) = calls(zm_api, "POST", "api/v3/states")
+    # zm-api's CreateStateRequest has no default for is_active: without it
+    # the create answers 422.
     assert post.kwargs["json"] == {
         "name": "Holiday",
         "definition": "1:Always:Always:Always",
+        "is_active": 0,
     }
 
 
