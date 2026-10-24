@@ -165,8 +165,12 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 ) as response:
                     if response.status in (401, 403):
                         if attempt == 2:
-                            raise ZMAuthenticationError(
-                                "Authentication failed after refreshing the token"
+                            # The login just succeeded, so this is the user's
+                            # permissions refusing the request, not a bad token.
+                            message = await _error_message(response)
+                            raise ZMApiError(
+                                f"{endpoint} was refused: "
+                                f"{message or 'insufficient privileges'}"
                             )
                         self._authenticated = False
                         await self.authenticate()
@@ -493,6 +497,22 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     async def check_go2rtc(self) -> dict[str, Any] | None:
         """Return the discovered go2rtc configuration, if any."""
         return await self._async_discover_go2rtc()
+
+
+async def _error_message(response: aiohttp.ClientResponse) -> str | None:
+    """Return the server's error text from an API v2 error reply.
+
+    Errors come back as ``{"success": false, "data": {"message": ...}}``.
+    """
+    try:
+        body = await response.json(content_type=None)
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    data = body.get("data")
+    message = data.get("message") if isinstance(data, dict) else None
+    return str(message) if message else None
 
 
 def _parse_host(url: str) -> str | None:
