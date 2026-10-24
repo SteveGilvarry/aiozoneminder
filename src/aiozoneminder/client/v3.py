@@ -91,6 +91,8 @@ _RTSP_LINK_TTL = timedelta(days=7)
 _RTSP_LINK_RENEW = timedelta(days=1)
 #: After the server says RTSP is unavailable, wait this long before asking again.
 _RTSP_RETRY = timedelta(minutes=10)
+#: zm-api refuses an alarm cause longer than this many bytes.
+_ALARM_CAUSE_MAX = 31
 
 #: What zm-api's WHEP status codes mean, in words the user can act on.
 _WHEP_ERRORS = {
@@ -242,6 +244,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
 
         for attempt in (1, 2):
             headers = {**kwargs.pop("headers", {}), **self._auth_headers()}
+            detail: str | None = None
             try:
                 async with self._session.request(
                     method,
@@ -261,6 +264,8 @@ class ZoneMinderV3Client(ZoneMinderClient):
                         continue
                     if response.status == 404:
                         raise ZMNotFoundError(f"Not found: {endpoint}")
+                    if response.status >= 400:
+                        detail = _error_message(await response.text())
                     response.raise_for_status()
                     if response.status == 204 or not response.content_length:
                         text = await response.text()
@@ -270,7 +275,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
                     return await response.json(content_type=None)
             except aiohttp.ClientResponseError as err:
                 raise ZMApiError(
-                    f"{endpoint} returned {err.status}: {err.message}"
+                    f"{endpoint} returned {err.status}: {detail or err.message}"
                 ) from err
             except (aiohttp.ClientError, TimeoutError) as err:
                 raise ZMConnectionError(f"Request to {endpoint} failed: {err}") from err
@@ -533,7 +538,11 @@ class ZoneMinderV3Client(ZoneMinderClient):
     # -- Alarm and PTZ -------------------------------------------------------
 
     async def trigger_alarm(self, monitor_id: int, cause: str) -> None:
-        """Force a monitor into alarm state."""
+        """Force a monitor into alarm state.
+
+        The cause is cut to the length ZoneMinder stores, which zm-api enforces.
+        """
+        cause = cause.encode()[:_ALARM_CAUSE_MAX].decode(errors="ignore")
         await self._request(
             "PATCH",
             V3_MONITOR_ALARM.format(monitor_id=monitor_id),
@@ -946,6 +955,18 @@ class ZoneMinderV3Client(ZoneMinderClient):
             allow_redirects=False,
         ) as response:
             yield response
+
+
+def _error_message(body: str) -> str | None:
+    """Return the reason from a zm-api error body, if it has one."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    message = payload.get("error_message") if isinstance(payload, dict) else None
+    if not isinstance(message, str):
+        return None
+    return message.strip() or None
 
 
 def _iso8601(value: datetime) -> str:
