@@ -2,7 +2,7 @@
 
 ## 0.1.0 (unreleased)
 
-First release, extracted from the ZMHA Home Assistant integration.
+First release, extracted from the zm-homeassistant Home Assistant integration.
 
 - One async client interface over ZoneMinder API v3 (zm-api) and the built-in
   API v2, chosen with `create_client`.

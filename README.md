@@ -11,8 +11,8 @@ either of ZoneMinder's APIs through the same methods:
 
 It's built on aiohttp and takes your session rather than making its own, so it
 fits into an existing asyncio application. It powers the
-[ZMHA](https://github.com/SteveGilvarry/zmha) Home Assistant integration, but
-doesn't depend on Home Assistant.
+[zm-homeassistant](https://github.com/SteveGilvarry/zm-homeassistant) Home
+Assistant integration, but doesn't depend on Home Assistant.
 
 ## Install
 
