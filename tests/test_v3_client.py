@@ -307,8 +307,46 @@ async def test_events_between_sends_utc(
     await client.get_events_between(1, start, end)
     params = calls(zm_api, "GET", "api/v3/events")[0].kwargs["params"]
     assert params["start_time"] == "2026-08-22T23:00:00Z"
-    assert params["end_time"] == "2026-08-23T01:00:00Z"
     assert params["monitor_id"] == 1
+
+
+async def test_events_between_include_the_running_event(
+    client: ZoneMinderV3Client, zm_api: aioresponses
+) -> None:
+    start = datetime(2026, 8, 22, tzinfo=UTC)
+    end = datetime(2026, 8, 23, tzinfo=UTC)
+    events = await client.get_events_between(1, start, end)
+    # 300 is still recording: zm-api's end filter would drop it.
+    assert [e.id for e in events] == [300, 299]
+    assert "end_time" not in calls(zm_api, "GET", "api/v3/events")[0].kwargs["params"]
+
+
+async def test_events_between_stop_at_the_window_end(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    from .fixtures import event
+
+    register_login(mocked)
+    days = [f"2026-08-{day:02d}T12:00:00Z" for day in range(20, 26)]
+    # Read oldest first, one page per event, so later days are never fetched.
+    pages = [paginated([event(i, 1, start=day)]) for i, day in enumerate(days)]
+    for page in pages:
+        page["last_page"] = len(days)
+    for page in pages:
+        mocked.get(url("api/v3/events"), payload=page)
+
+    events = await client.get_events_between(
+        1,
+        datetime(2026, 8, 20, tzinfo=UTC),
+        datetime(2026, 8, 22, tzinfo=UTC),
+        limit=1,
+    )
+
+    # Newest first, at most limit of them.
+    assert [e.id for e in events] == [1]
+    requests = calls(mocked, "GET", "api/v3/events")
+    assert [r.kwargs["params"]["page"] for r in requests] == [1, 2, 3]
+    assert requests[0].kwargs["params"]["direction"] == "asc"
 
 
 async def test_one_event(client: ZoneMinderV3Client, mocked: aioresponses) -> None:
