@@ -485,7 +485,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     # -- Alarm and PTZ -------------------------------------------------------
 
     async def trigger_alarm(self, monitor_id: int, cause: str) -> None:
-        """Force a monitor into alarm state."""
+        """Force a monitor into alarm state.
+
+        The event's cause is always "Forced Web": ZoneMinder runs ``zmu -a``,
+        which takes no cause, so ``cause`` is sent but not recorded. The web
+        trigger (``ajax/trigger.php``) takes one, but needs Monitors=Edit for
+        every monitor, which would refuse users who may edit only some.
+        """
         await self._request(
             "GET", API_ALARM_ON.format(monitor_id=monitor_id), params={"cause": cause}
         )
