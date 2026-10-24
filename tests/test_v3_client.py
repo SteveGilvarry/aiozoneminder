@@ -421,27 +421,33 @@ async def test_alarms(client: ZoneMinderV3Client, mocked: aioresponses) -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "kwargs", "path"),
+    ("command", "kwargs", "path", "body"),
     [
-        ("up-left", {}, "move/up-left"),
-        ("stop", {}, "move/stop"),
-        ("zoom-in", {}, "zoom/in"),
-        ("focus-auto", {}, "focus/auto"),
-        ("home", {}, "home"),
-        ("preset", {"preset": 2}, "presets/2/goto"),
+        # Control modules treat a missing speed as 0, which stops the camera,
+        # so every move carries both speeds and zoom/focus carry theirs.
+        ("up-left", {}, "move/up-left", {"pan_speed": 50, "tilt_speed": 50}),
+        ("down", {"speed": 80}, "move/down", {"pan_speed": 80, "tilt_speed": 80}),
+        ("stop", {}, "move/stop", {"pan_speed": 50, "tilt_speed": 50}),
+        ("zoom-in", {}, "zoom/in", {"speed": 50}),
+        ("focus-auto", {}, "focus/auto", {"speed": 50}),
+        ("home", {}, "home", {}),
+        ("preset", {"preset": 2}, "presets/2/goto", {}),
     ],
 )
 async def test_ptz_commands(
     client: ZoneMinderV3Client,
     mocked: aioresponses,
+    *,
     command: str,
     kwargs: dict[str, Any],
     path: str,
+    body: dict[str, Any],
 ) -> None:
     register_login(mocked)
     mocked.post(url(f"api/v3/ptz/monitors/3/{path}"), payload={})
     await client.ptz(3, command, **kwargs)
-    assert len(calls(mocked, "POST", f"api/v3/ptz/monitors/3/{path}")) == 1
+    (call,) = calls(mocked, "POST", f"api/v3/ptz/monitors/3/{path}")
+    assert call.kwargs["json"] == body
 
 
 async def test_ptz_preset_needs_a_number(
@@ -758,3 +764,20 @@ def test_media_paths(client: ZoneMinderV3Client) -> None:
     assert client.get_webrtc_signaling_url(1) == (
         "ws://192.168.0.45:8080/api/v3/live/1/webrtc/ws"
     )
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+async def test_server_control(
+    client: ZoneMinderV3Client, mocked: aioresponses, action: str
+) -> None:
+    register_login(mocked)
+    mocked.post(url(f"api/v3/server/control/{action}"), payload={"message": "ok"})
+    await client.server_control(action)
+    assert len(calls(mocked, "POST", f"api/v3/server/control/{action}")) == 1
+
+
+async def test_server_control_rejects_other_actions(
+    client: ZoneMinderV3Client,
+) -> None:
+    with pytest.raises(ValueError, match="reboot"):
+        await client.server_control("reboot")

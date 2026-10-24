@@ -217,17 +217,35 @@ class Monitor:
         )
 
 
+#: Each pre-1.37 ``Function`` as (capturing, analysing, recording).
+_FUNCTION_FIELDS: dict[str, tuple[str, str, str]] = {
+    "None": ("None", "None", "None"),
+    "Monitor": ("Always", "None", "None"),
+    "Modect": ("Always", "Always", "OnMotion"),
+    "Record": ("Always", "None", "Always"),
+    "Mocord": ("Always", "Always", "Always"),
+    "Nodect": ("Always", "None", "OnMotion"),
+}
+
+
+def function_fields(function: str) -> tuple[str, str, str]:
+    """Return a pre-1.37 function, such as Modect, as (capturing, analysing, recording).
+
+    For callers that still think in the old single mode, like Home
+    Assistant's core integration did. Pass the result to
+    ``set_monitor_state``.
+    """
+    try:
+        return _FUNCTION_FIELDS[function]
+    except KeyError:
+        raise ValueError(
+            f"Unknown function {function!r}; use one of {list(_FUNCTION_FIELDS)}"
+        ) from None
+
+
 def _expand_function(function: str | None) -> tuple[str, str, str]:
-    """Expand a legacy ``Function`` into (capturing, analysing, recording)."""
-    mapping = {
-        "None": ("None", "None", "None"),
-        "Monitor": ("Always", "None", "None"),
-        "Modect": ("Always", "Always", "OnMotion"),
-        "Record": ("Always", "None", "Always"),
-        "Mocord": ("Always", "Always", "Always"),
-        "Nodect": ("Always", "None", "OnMotion"),
-    }
-    return mapping.get(function or "None", ("None", "None", "None"))
+    """Expand an API v2 ``Function``, treating a missing one as None."""
+    return _FUNCTION_FIELDS.get(function or "None", _FUNCTION_FIELDS["None"])
 
 
 @dataclass
@@ -256,6 +274,26 @@ class MonitorStatus:
             analysis_fps=_to_float(data.get("analysis_fps")),
             capture_bandwidth=_to_int(data.get("capture_bandwidth")),
             updated_on=_parse_datetime(data.get("updated_on")),
+        )
+
+    @classmethod
+    def from_dict(
+        cls, data: dict[str, Any], tz: tzinfo | None = None
+    ) -> MonitorStatus | None:
+        """Build from an API v2 ``Monitor_Status`` row; None when it's empty.
+
+        A monitor ZoneMinder has never started has no row, which the API
+        returns as a row of nulls.
+        """
+        if data.get("MonitorId") is None:
+            return None
+        return cls(
+            monitor_id=int(data["MonitorId"]),
+            status=data.get("Status") or "Unknown",
+            capture_fps=_to_float(data.get("CaptureFPS")),
+            analysis_fps=_to_float(data.get("AnalysisFPS")),
+            capture_bandwidth=_to_int(data.get("CaptureBandwidth")),
+            updated_on=_parse_datetime(data.get("UpdatedOn"), tz),
         )
 
 
@@ -396,6 +434,23 @@ class EventSummary:
             archived_events=_to_int(data.get("archived_events")),
             total_disk_space=_to_int(data.get("total_event_disk_space")),
             day_disk_space=_to_int(data.get("day_event_disk_space")),
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EventSummary | None:
+        """Build from an API v2 ``Event_Summary`` row; None when it's empty."""
+        if data.get("MonitorId") is None:
+            return None
+        return cls(
+            monitor_id=int(data["MonitorId"]),
+            total_events=_to_int(data.get("TotalEvents")),
+            hour_events=_to_int(data.get("HourEvents")),
+            day_events=_to_int(data.get("DayEvents")),
+            week_events=_to_int(data.get("WeekEvents")),
+            month_events=_to_int(data.get("MonthEvents")),
+            archived_events=_to_int(data.get("ArchivedEvents")),
+            total_disk_space=_to_int(data.get("TotalEventDiskSpace")),
+            day_disk_space=_to_int(data.get("DayEventDiskSpace")),
         )
 
 

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aiozoneminder import function_fields
 from aiozoneminder.models import Event, Monitor, MonitorStatus
 
 from .fixtures import event as make_event, monitor as make_monitor
@@ -169,3 +170,24 @@ def test_monitor_status_parses_string_numbers() -> None:
     )
     assert parsed.capture_fps == pytest.approx(10.94)
     assert parsed.connected is True
+
+
+@pytest.mark.parametrize(
+    ("function", "fields"),
+    [
+        ("None", ("None", "None", "None")),
+        ("Monitor", ("Always", "None", "None")),
+        ("Modect", ("Always", "Always", "OnMotion")),
+        ("Record", ("Always", "None", "Always")),
+        ("Mocord", ("Always", "Always", "Always")),
+        ("Nodect", ("Always", "None", "OnMotion")),
+    ],
+)
+def test_function_fields(function: str, fields: tuple[str, str, str]) -> None:
+    """Each pre-1.37 function is a fixed (capturing, analysing, recording)."""
+    assert function_fields(function) == fields
+
+
+def test_function_fields_rejects_unknown_names() -> None:
+    with pytest.raises(ValueError, match="Motion"):
+        function_fields("Motion")

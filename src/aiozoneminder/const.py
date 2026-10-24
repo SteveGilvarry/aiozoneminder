@@ -18,6 +18,9 @@ DEFAULT_TIMEOUT: Final = 10
 #: For endpoints that read from disk or start a session.
 LONG_TIMEOUT: Final = 30
 
+#: API v2 MJPEG frame rate cap unless the caller sets one.
+DEFAULT_STREAM_MAXFPS: Final = 30
+
 # -- ZoneMinder config names -------------------------------------------------
 
 CONFIG_MQTT_TOPIC_PREFIX: Final = "ZM_MQTT_TOPIC_PREFIX"
@@ -34,12 +37,19 @@ API_MONITORS: Final = "api/monitors.json"
 API_MONITOR: Final = "api/monitors/{monitor_id}.json"
 API_EVENTS: Final = "api/events.json"
 API_EVENT: Final = "api/events/{event_id}.json"
-API_CONTROLS: Final = "api/controls/{monitor_id}.json"
 API_ALARM_ON: Final = "api/monitors/alarm/id:{monitor_id}/command:on.json"
 API_ALARM_OFF: Final = "api/monitors/alarm/id:{monitor_id}/command:off.json"
 API_STATES: Final = "api/states.json"
+API_SERVERS: Final = "api/servers.json"
+API_DAEMON_CHECK: Final = "api/host/daemonCheck.json"
 API_STATE_CHANGE: Final = "api/states/change/{name}.json"
 STREAM_PATH: Final = "cgi-bin/nph-zms"
+#: Where else packages serve nph-zms, from the server root: a web root
+#: install, source builds, and RPM. STREAM_PATH under the web path is tried
+#: first, which is where Debian and Ubuntu put it.
+ZMS_PATHS: Final = ["/zm/cgi-bin/nph-zms", "/cgi-bin/nph-zms", "/cgi-bin-zm/nph-zms"]
+#: ZoneMinder's web request handler, which takes PTZ commands.
+WEB_REQUEST: Final = "index.php"
 EVENT_VIDEO_PATH: Final = "api/events/{event_id}.mp4"
 
 # -- API v3 (zm-api) endpoints (joined with the host) ------------------------
@@ -89,6 +99,10 @@ V3_CONTROL_PRESETS: Final = "api/v3/control_presets"
 V3_STORAGE: Final = "api/v3/storage"
 V3_SYSTEM_STATUS: Final = "api/v3/system/status"
 V3_SERVER_HEALTH: Final = "api/v3/server/health_check"
+V3_SERVER_CONTROL: Final = "api/v3/server/control/{action}"
+
+#: What server_control accepts: ZoneMinder's own start, stop and restart.
+SERVER_ACTIONS: Final = ["start", "stop", "restart"]
 
 # -- Monitor modes -----------------------------------------------------------
 # ZoneMinder 1.37 split the single "Function" into separate fields. These
@@ -145,6 +159,11 @@ ORIENTATION_DEGREES: Final = {
 }
 
 # -- PTZ ---------------------------------------------------------------------
+
+#: Speed, in percent, for moves, zoom and focus when the caller gives none.
+#: ZoneMinder's control modules treat a missing speed as 0, which stops the
+#: camera instead of moving it.
+PTZ_DEFAULT_SPEED: Final = 50
 
 #: The PTZ commands both backends accept.
 PTZ_MOVE_COMMANDS: Final = [

@@ -11,8 +11,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
 import re
+import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -20,32 +21,46 @@ from ..const import (
     API_ALARM_OFF,
     API_ALARM_ON,
     API_CONFIGS,
-    API_CONTROLS,
+    API_DAEMON_CHECK,
     API_EVENT,
     API_EVENTS,
     API_LOGIN,
     API_LOGOUT,
     API_MONITOR,
     API_MONITORS,
+    API_SERVERS,
     API_STATE_CHANGE,
     API_STATES,
     API_VERSION,
     BACKEND_LEGACY,
     CONFIG_GO2RTC_PATH,
+    DEFAULT_STREAM_MAXFPS,
     DEFAULT_TIMEOUT,
     EVENT_VIDEO_PATH,
     LONG_TIMEOUT,
+    PTZ_DEFAULT_SPEED,
     STREAM_PATH,
     STREAM_TYPE_GO2RTC,
     STREAM_TYPE_MJPEG,
+    WEB_REQUEST,
+    ZMS_PATHS,
 )
 from ..exceptions import (
     ZMApiError,
     ZMAuthenticationError,
     ZMConnectionError,
+    ZMError,
     ZMNotSupportedError,
 )
-from ..models import Event, Monitor, RunState, ServerInfo
+from ..models import (
+    Event,
+    EventSummary,
+    Monitor,
+    MonitorStatus,
+    RunState,
+    ServerInfo,
+    _to_int,
+)
 from .base import ZoneMinderClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +87,13 @@ _PTZ_MAP = {
     "preset": "presetGoto",
 }
 
+#: Commands that go to a fixed position, so take no speed.
+_PTZ_NO_SPEED = {"home", "preset"}
+
+#: How long a monitor list's statuses and event counts are reused. The
+#: coordinator asks for them straight after the list, in the same poll.
+_MONITOR_LIST_TTL = 10.0
+
 #: ZoneMinder 1.37 renamed the single Function field. Writing both keeps this
 #: backend working across 1.36 and 1.37+.
 _FUNCTION_FROM_STATE = {
@@ -89,10 +111,34 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
 
     backend = BACKEND_LEGACY
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the client."""
+    def __init__(
+        self,
+        *args: Any,
+        zms_path: str | None = None,
+        stream_scale: int | None = None,
+        stream_maxfps: float | None = DEFAULT_STREAM_MAXFPS,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the client.
+
+        ``zms_path`` is where ZoneMinder serves nph-zms: a path from the
+        server root such as ``/cgi-bin-zm/nph-zms``, or a full URL. When
+        omitted it is found after login. ``stream_scale`` (percent) and
+        ``stream_maxfps`` shrink and slow MJPEG to save bandwidth.
+        """
         super().__init__(*args, **kwargs)
+        self._stream_scale = stream_scale
+        self._stream_maxfps = stream_maxfps
+        #: Monitor id to the id of the server recording it, when not the main one.
+        self._monitor_servers: dict[int, int] = {}
+        #: Server id to (nph-zms URL, index.php URL); None until first needed.
+        self._servers: dict[int, tuple[str, str]] | None = None
         self._auth_token: str | None = None
+        self._zms_url: str | None = _zms_url(self._host, zms_path) if zms_path else None
+        self._zms_checked = zms_path is not None
+        self._statuses: dict[int, MonitorStatus] = {}
+        self._summaries: dict[int, EventSummary] = {}
+        self._monitors_fetched_at: float | None = None
         self._go2rtc: dict[str, Any] | None = None
         self._go2rtc_checked = False
         self._go2rtc_streams: dict[int, str] = {}
@@ -122,9 +168,37 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         except (aiohttp.ClientError, TimeoutError) as err:
             raise ZMConnectionError(f"Connection failed: {err}") from err
 
-        self._auth_token = result.get("access_token") or result.get("credentials")
+        # Before 1.34 login returned only an auth= string, not a token; those
+        # servers authenticate by the session cookie the login just set.
+        self._auth_token = result.get("access_token")
         self._authenticated = True
+        if not self._zms_checked:
+            self._zms_checked = True
+            self._zms_url = await self._async_find_zms()
         return True
+
+    async def _async_find_zms(self) -> str | None:
+        """Find where nph-zms is served.
+
+        Packages put it in different places: under the web path on Debian
+        and Ubuntu, /cgi-bin-zm on RPM, /cgi-bin from source. The right path
+        answers anything but 404 (403 without a login).
+        """
+        origin = _origin(self._host)
+        candidates = [self._build_url(STREAM_PATH)]
+        candidates += [f"{origin}{path}" for path in ZMS_PATHS]
+        for url in dict.fromkeys(candidates):
+            try:
+                async with self._session.get(
+                    url, timeout=self._timeout, ssl=self._verify_ssl
+                ) as response:
+                    if response.status != 404:
+                        _LOGGER.debug("Found nph-zms at %s", url)
+                        return url
+            except (aiohttp.ClientError, TimeoutError) as err:
+                _LOGGER.debug("No nph-zms at %s: %s", url, err)
+        _LOGGER.debug("nph-zms not found, assuming %s", candidates[0])
+        return None
 
     async def close(self) -> None:
         """Log out."""
@@ -147,7 +221,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         if not self._authenticated:
             await self.authenticate()
 
-        url = self._build_url(endpoint)
+        url = endpoint if "://" in endpoint else self._build_url(endpoint)
         base_params = kwargs.pop("params", {})
 
         for attempt in (1, 2):
@@ -174,7 +248,12 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                     if response.status == 404:
                         raise ZMApiError(f"Not found: {endpoint}")
                     response.raise_for_status()
-                    return await response.json(content_type=None)
+                    try:
+                        return await response.json(content_type=None)
+                    except ValueError as err:
+                        raise ZMApiError(
+                            f"{endpoint} returned a page that is not JSON"
+                        ) from err
             except aiohttp.ClientResponseError as err:
                 raise ZMApiError(
                     f"{endpoint} returned {err.status}: {err.message}"
@@ -192,8 +271,19 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         return str(response.get("version") or "unknown")
 
     async def get_server_info(self) -> ServerInfo:
-        """Return the version. The legacy API exposes no daemon or disk data."""
-        return ServerInfo(version=await self.get_version())
+        """Return the version, and whether ZoneMinder's daemons are running.
+
+        daemonCheck needs System view rights; without them ``running`` is
+        False and the version still comes back.
+        """
+        info = ServerInfo(version=await self.get_version())
+        try:
+            check = await self._request("GET", API_DAEMON_CHECK)
+        except ZMError as err:
+            _LOGGER.debug("daemonCheck unavailable: %s", err)
+        else:
+            info.running = isinstance(check, dict) and _to_int(check.get("result")) == 1
+        return info
 
     async def get_configs(self) -> dict[str, str]:
         """Return ZoneMinder's configuration keys and values."""
@@ -209,15 +299,99 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     # -- Monitors ------------------------------------------------------------
 
     async def get_monitors(self) -> list[Monitor]:
-        """Return every monitor."""
+        """Return every monitor that hasn't been deleted.
+
+        The same response carries each monitor's capture status and event
+        counts, which are kept for :meth:`get_monitor_statuses` and
+        :meth:`get_event_summary`.
+        """
         response = await self._request("GET", API_MONITORS)
         monitors = []
+        statuses: dict[int, MonitorStatus] = {}
+        summaries: dict[int, EventSummary] = {}
+        monitor_servers: dict[int, int] = {}
         for item in response.get("monitors") or []:
+            # ZoneMinder 1.38 keeps deleted monitors, marked Deleted.
+            raw = item.get("Monitor", item)
+            if str(raw.get("Deleted", "0")).lower() in ("1", "true"):
+                continue
             try:
                 monitors.append(Monitor.from_dict(item))
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Skipping unparsable monitor: %s", err)
+                continue
+            if server_id := monitors[-1].server_id:
+                monitor_servers[monitors[-1].id] = server_id
+            if status := MonitorStatus.from_dict(
+                item.get("Monitor_Status") or {}, self._timezone
+            ):
+                statuses[status.monitor_id] = status
+            # No summary row means no events yet: zero, as API v3 reports it.
+            summaries[monitors[-1].id] = EventSummary.from_dict(
+                item.get("Event_Summary") or {}
+            ) or EventSummary(monitor_id=monitors[-1].id)
+        self._statuses = statuses
+        self._summaries = summaries
+        self._monitors_fetched_at = time.monotonic()
+        self._monitor_servers = monitor_servers
+        if monitor_servers and self._servers is None:
+            self._servers = await self._async_load_servers()
         return monitors
+
+    async def _async_load_servers(self) -> dict[int, tuple[str, str]]:
+        """Read the multi-server list: where each server serves streams and PTZ."""
+        try:
+            response = await self._request("GET", API_SERVERS)
+        except ZMError as err:
+            _LOGGER.warning(
+                "Could not read ZoneMinder's servers, so every camera streams "
+                "from %s: %s",
+                self._host,
+                err,
+            )
+            return {}
+        servers: dict[int, tuple[str, str]] = {}
+        for item in response.get("servers") or []:
+            raw = item.get("Server", item)
+            if not raw.get("Hostname"):
+                continue
+            scheme = raw.get("Protocol") or urlsplit(self._host).scheme
+            netloc = raw["Hostname"]
+            if str(raw.get("Port") or "").strip():
+                netloc = f"{netloc}:{raw['Port']}"
+            base = f"{scheme}://{netloc}"
+            zms = raw.get("PathToZMS") or "/zm/cgi-bin/nph-zms"
+            index = raw.get("PathToIndex") or "/zm/index.php"
+            servers[_to_int(raw.get("Id"))] = (
+                f"{base}/{zms.lstrip('/')}",
+                f"{base}/{index.lstrip('/')}",
+            )
+        return servers
+
+    def _monitor_server(self, monitor_id: int) -> tuple[str, str] | None:
+        """Return (nph-zms URL, index.php URL) of a monitor's own server, if remote."""
+        server_id = self._monitor_servers.get(monitor_id)
+        if server_id is None or not self._servers:
+            return None
+        return self._servers.get(server_id)
+
+    async def _async_fresh_monitor_list(self) -> None:
+        """Fetch the monitor list unless one was fetched moments ago."""
+        if (
+            self._monitors_fetched_at is None
+            or time.monotonic() - self._monitors_fetched_at > _MONITOR_LIST_TTL
+        ):
+            await self.get_monitors()
+
+    async def get_monitor_statuses(self) -> dict[int, MonitorStatus]:
+        """Return each monitor's capture status, from the monitor list."""
+        await self._async_fresh_monitor_list()
+        return dict(self._statuses)
+
+    async def get_event_summary(self, monitor_id: int) -> EventSummary | None:
+        """Return a monitor's event counts, from the monitor list."""
+        await self._async_fresh_monitor_list()
+        return self._summaries.get(monitor_id)
 
     async def get_monitor(self, monitor_id: int) -> Monitor:
         """Return a single monitor."""
@@ -274,6 +448,10 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             "POST", API_STATE_CHANGE.format(name=quote(state.name, safe=""))
         )
 
+    async def _async_server_control(self, action: str) -> None:
+        """zmpkg.pl takes start, stop and restart as well as run state names."""
+        await self._request("POST", API_STATE_CHANGE.format(name=action))
+
     # -- Events --------------------------------------------------------------
 
     async def get_events(
@@ -317,39 +495,57 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         await self._request("GET", API_ALARM_OFF.format(monitor_id=monitor_id))
 
     async def ptz(self, monitor_id: int, command: str, **kwargs: Any) -> None:
-        """Issue a PTZ command."""
+        """Issue a PTZ command.
+
+        Sent as ZoneMinder's own web UI sends it: the API's Controls endpoint
+        only reads control definitions. ``speed`` (0-100) sets how fast moves,
+        zoom and focus go; without one the control module stops the camera.
+        """
         control = _PTZ_MAP.get(command)
         if control is None:
             raise ZMNotSupportedError(f"Unsupported PTZ command: {command}")
 
-        data: dict[str, Any] = {"control": control}
+        data: dict[str, Any] = {
+            "view": "request",
+            "request": "control",
+            "id": monitor_id,
+            "control": control,
+        }
         if command == "preset":
             preset = kwargs.get("preset")
             if preset is None:
                 raise ZMApiError("The 'preset' command requires a preset number")
             data["preset"] = preset
+        if command not in _PTZ_NO_SPEED:
+            speed = kwargs.get("speed", PTZ_DEFAULT_SPEED)
+            data["xge"] = data["yge"] = speed
         for key, param in (("x", "xCoord"), ("y", "yCoord")):
             if (value := kwargs.get(key)) is not None:
                 data[param] = value
 
-        await self._request(
-            "POST", API_CONTROLS.format(monitor_id=monitor_id), data=data
-        )
+        server = self._monitor_server(monitor_id)
+        endpoint = server[1] if server else WEB_REQUEST
+        result = await self._request("POST", endpoint, data=data)
+        if isinstance(result, dict) and result.get("result") == "Error":
+            reason = result.get("message") or "no reason given"
+            raise ZMApiError(f"ZoneMinder refused PTZ {command}: {reason}")
 
     # -- Streaming -----------------------------------------------------------
 
     def get_stream_url(self, monitor_id: int, mode: str = "jpeg") -> str:
         """Build an MJPEG or single-frame URL for ZoneMinder's streaming CGI."""
-        params = {
-            "mode": mode,
-            "monitor": monitor_id,
-            "maxfps": 30,
-            "buffer": 1000,
-        }
+        params: dict[str, Any] = {"mode": mode, "monitor": monitor_id}
+        if self._stream_scale is not None:
+            params["scale"] = self._stream_scale
+        if self._stream_maxfps is not None and mode != "single":
+            params["maxfps"] = self._stream_maxfps
+        params["buffer"] = 1000
         if self._auth_token:
             params["token"] = self._auth_token
         query = "&".join(f"{key}={value}" for key, value in params.items())
-        return f"{self._build_url(STREAM_PATH)}?{query}"
+        server = self._monitor_server(monitor_id)
+        zms = server[0] if server else self._zms_url or self._build_url(STREAM_PATH)
+        return f"{zms}?{query}"
 
     def get_event_clip_url(self, event_id: int) -> str:
         """Build a URL for an event's MP4 clip."""
@@ -493,6 +689,19 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     async def check_go2rtc(self) -> dict[str, Any] | None:
         """Return the discovered go2rtc configuration, if any."""
         return await self._async_discover_go2rtc()
+
+
+def _origin(url: str) -> str:
+    """Return a URL's scheme and host, without any path."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _zms_url(host: str, zms_path: str) -> str:
+    """Resolve a given nph-zms path: a full URL, or a path from the root."""
+    if "://" in zms_path:
+        return zms_path.rstrip("/")
+    return f"{_origin(host)}/{zms_path.strip('/')}"
 
 
 def _parse_host(url: str) -> str | None:

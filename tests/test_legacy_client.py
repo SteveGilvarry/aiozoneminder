@@ -297,8 +297,6 @@ async def test_v3_only_features_say_so(client: ZoneMinderLegacyClient) -> None:
 
 async def test_reads_without_v3_return_nothing(client: ZoneMinderLegacyClient) -> None:
     """Reads API v2 can't do return empty results rather than failing."""
-    assert await client.get_monitor_statuses() == {}
-    assert await client.get_event_summary(1) is None
     assert await client.get_ptz_presets(1) == {}
     assert await client.async_get_rtsp_url(1) is None
 
@@ -375,14 +373,21 @@ async def test_alarms(client: ZoneMinderLegacyClient) -> None:
 @pytest.mark.parametrize(
     ("command", "kwargs", "expected"),
     [
-        ("up", {}, {"control": "moveConUp"}),
-        ("zoom-in", {}, {"control": "zoomConTele"}),
+        ("up", {}, {"control": "moveConUp", "xge": 50, "yge": 50}),
+        ("down", {"speed": 80}, {"control": "moveConDown", "xge": 80, "yge": 80}),
+        ("zoom-in", {}, {"control": "zoomConTele", "xge": 50, "yge": 50}),
         ("home", {}, {"control": "presetHome"}),
         ("preset", {"preset": 4}, {"control": "presetGoto", "preset": 4}),
         (
             "left",
             {"x": 10, "y": 20},
-            {"control": "moveConLeft", "xCoord": 10, "yCoord": 20},
+            {
+                "control": "moveConLeft",
+                "xge": 50,
+                "yge": 50,
+                "xCoord": 10,
+                "yCoord": 20,
+            },
         ),
     ],
 )
@@ -392,12 +397,46 @@ async def test_ptz(
     kwargs: dict[str, Any],
     expected: dict[str, Any],
 ) -> None:
+    """PTZ goes through the web request ZoneMinder's own UI uses.
+
+    The Controls API only reads control definitions, so it can't move a
+    camera. Without xge/yge the control module gets speed 0 and stops.
+    """
     with aioresponses() as mocked:
         _login(mocked)
-        mocked.post(v2(r"api/controls/3\.json"), payload={})
+        mocked.post(v2(r"index\.php"), payload={"result": "Ok"})
         await client.ptz(3, command, **kwargs)
-        (call,) = sent(mocked, "POST", "api/controls/3.json")
-    assert call.kwargs["data"] == expected
+        (call,) = sent(mocked, "POST", "index.php")
+    assert call.kwargs["params"] == {"token": "token"}
+    assert call.kwargs["data"] == {
+        "view": "request",
+        "request": "control",
+        "id": 3,
+        **expected,
+    }
+
+
+async def test_ptz_refused(client: ZoneMinderLegacyClient) -> None:
+    """ZoneMinder refuses a command with HTTP 200 and an error result."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.post(
+            v2(r"index\.php"),
+            payload={"result": "Error", "message": "No command received"},
+        )
+        with pytest.raises(ZMApiError, match="No command received"):
+            await client.ptz(3, "up")
+
+
+async def test_html_instead_of_json(client: ZoneMinderLegacyClient) -> None:
+    """A login page or proxy error page is an API error, not a crash."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.post(
+            v2(r"index\.php"), body="<html>Login</html>", content_type="text/html"
+        )
+        with pytest.raises(ZMApiError, match="not JSON"):
+            await client.ptz(3, "up")
 
 
 async def test_ptz_mistakes(client: ZoneMinderLegacyClient) -> None:
@@ -467,3 +506,405 @@ async def test_close_logs_out(client: ZoneMinderLegacyClient) -> None:
         await client.close()
         assert sent(mocked, "GET", "api/host/logout.json")
     assert not client.authenticated
+
+
+def _monitor_item(
+    monitor_id: int,
+    *,
+    deleted: Any = None,
+    status: dict[str, Any] | None = None,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One entry of api/monitors.json, as ZoneMinder 1.38 returns it."""
+    monitor: dict[str, Any] = {
+        "Id": str(monitor_id),
+        "Name": f"Camera {monitor_id}",
+        "Capturing": "Always",
+        "Analysing": "Always",
+        "Recording": "OnMotion",
+    }
+    if deleted is not None:
+        monitor["Deleted"] = deleted
+    return {
+        "Monitor": monitor,
+        "Monitor_Status": status
+        or {
+            "MonitorId": str(monitor_id),
+            "Status": "Connected",
+            "CaptureFPS": "14.97",
+            "AnalysisFPS": "5.00",
+            "CaptureBandwidth": "312000",
+            "UpdatedOn": "2026-10-24 09:15:02",
+        },
+        "Event_Summary": summary
+        or {
+            "MonitorId": str(monitor_id),
+            "TotalEvents": "812",
+            "TotalEventDiskSpace": "9000000",
+            "HourEvents": "3",
+            "DayEvents": "41",
+            "DayEventDiskSpace": "450000",
+            "WeekEvents": "210",
+            "MonthEvents": "790",
+            "ArchivedEvents": "2",
+        },
+    }
+
+
+async def test_deleted_monitors_are_left_out(client: ZoneMinderLegacyClient) -> None:
+    """ZoneMinder 1.38 keeps deleted monitors, marked Deleted, in the API."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [
+                    _monitor_item(1),
+                    _monitor_item(2, deleted="1"),
+                    _monitor_item(3, deleted=True),
+                    _monitor_item(4, deleted="0"),
+                ]
+            },
+        )
+        monitors = await client.get_monitors()
+        statuses = await client.get_monitor_statuses()
+
+    assert [monitor.id for monitor in monitors] == [1, 4]
+    assert sorted(statuses) == [1, 4]
+
+
+async def test_health_comes_with_the_monitor_list(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """Capture status is in api/monitors.json, so it costs no extra request."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [
+                    _monitor_item(1),
+                    _monitor_item(2, status={"MonitorId": "2", "Status": "NotRunning"}),
+                ]
+            },
+        )
+        await client.get_monitors()
+        statuses = await client.get_monitor_statuses()
+        assert len(sent(mocked, "GET", "api/monitors.json")) == 1
+
+    assert statuses[1].connected
+    assert statuses[1].capture_fps == pytest.approx(14.97)
+    assert statuses[1].capture_bandwidth == 312000
+    assert statuses[1].updated_on is not None
+    assert not statuses[2].connected
+    assert statuses[2].status == "NotRunning"
+
+
+async def test_health_on_its_own(client: ZoneMinderLegacyClient) -> None:
+    """Without a fresh monitor list, statuses fetch one."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors\.json"), payload={"monitors": [_monitor_item(1)]})
+        statuses = await client.get_monitor_statuses()
+    assert statuses[1].connected
+
+
+async def test_monitor_without_a_status_row(client: ZoneMinderLegacyClient) -> None:
+    """A monitor ZoneMinder has never started has no status and no events.
+
+    No events is a count of zero, as on API v3, not an unknown.
+    """
+    item = _monitor_item(1)
+    item["Monitor_Status"] = {"MonitorId": None, "Status": None}
+    item["Event_Summary"] = {"MonitorId": None}
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors\.json"), payload={"monitors": [item]})
+        await client.get_monitors()
+        assert await client.get_monitor_statuses() == {}
+        summary = await client.get_event_summary(1)
+    assert summary is not None
+    assert (summary.monitor_id, summary.day_events, summary.total_events) == (1, 0, 0)
+
+
+async def test_event_counts_come_with_the_monitor_list(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors\.json"), payload={"monitors": [_monitor_item(1)]})
+        await client.get_monitors()
+        summary = await client.get_event_summary(1)
+        assert await client.get_event_summary(9) is None
+        assert len(sent(mocked, "GET", "api/monitors.json")) == 1
+
+    assert summary is not None
+    assert (summary.hour_events, summary.day_events) == (3, 41)
+    assert (summary.week_events, summary.month_events) == (210, 790)
+    assert (summary.total_events, summary.archived_events) == (812, 2)
+    assert summary.total_disk_space == 9000000
+    assert summary.day_disk_space == 450000
+
+
+# -- Finding nph-zms ----------------------------------------------------------
+
+ORIGIN = "http://zm.local"
+
+
+def requests_to(mocked: aioresponses, full_url: str) -> list[Any]:
+    """Return the recorded GETs to one absolute URL, ignoring the query."""
+    return [
+        call
+        for (verb, called), calls in mocked.requests.items()
+        if verb == "GET" and str(called).split("?")[0] == full_url
+        for call in calls
+    ]
+
+
+async def test_zms_path_is_found_after_login(session: aiohttp.ClientSession) -> None:
+    """RPM installs serve nph-zms from /cgi-bin-zm, not under the web path.
+
+    The right path answers anything but 404 (403 without a login); wrong
+    ones are 404. Found once, then reused.
+    """
+    client = ZoneMinderLegacyClient(ZM, "admin", "hunter2", session)
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(f"{ZM}/cgi-bin/nph-zms", status=404)
+        mocked.get(f"{ORIGIN}/zm/cgi-bin/nph-zms", status=404)
+        mocked.get(f"{ORIGIN}/cgi-bin/nph-zms", status=404)
+        mocked.get(f"{ORIGIN}/cgi-bin-zm/nph-zms", status=403, repeat=True)
+        await client.authenticate()
+        await client.authenticate()
+        assert len(requests_to(mocked, f"{ORIGIN}/cgi-bin-zm/nph-zms")) == 1
+
+    assert client.get_stream_url(1).startswith(f"{ORIGIN}/cgi-bin-zm/nph-zms?mode=jpeg")
+
+
+async def test_zms_path_falls_back_to_the_web_path(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """When nothing answers, use the Debian layout under the web path."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        await client.authenticate()
+    assert client.get_stream_url(1).startswith(f"{ZM}/cgi-bin/nph-zms?")
+
+
+@pytest.mark.parametrize(
+    ("zms_path", "expected"),
+    [
+        ("/cgi-bin-zm/nph-zms", f"{ORIGIN}/cgi-bin-zm/nph-zms"),
+        (
+            "https://cams.example/cgi-bin/nph-zms",
+            "https://cams.example/cgi-bin/nph-zms",
+        ),
+    ],
+)
+async def test_zms_path_can_be_given(
+    session: aiohttp.ClientSession, zms_path: str, expected: str
+) -> None:
+    """A path given by the caller is used as is, without probing."""
+    client = ZoneMinderLegacyClient(ZM, "admin", "hunter2", session, zms_path=zms_path)
+    with aioresponses() as mocked:
+        _login(mocked)
+        await client.authenticate()
+        assert not [verb for verb, _url in mocked.requests if verb == "GET"]
+    assert client.get_stream_url(1).startswith(f"{expected}?mode=jpeg")
+
+
+async def test_old_login_credentials_are_not_sent_as_a_token(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """Before 1.34, login gave only an auth= string, which isn't a token.
+
+    Those servers authenticate by session cookie instead.
+    """
+    with aioresponses() as mocked:
+        mocked.post(
+            f"{ZM}/api/host/login.json",
+            payload={"credentials": "auth=abc123", "append_password": 0},
+        )
+        mocked.get(v2(r"api/host/getVersion\.json"), payload={"version": "1.32.3"})
+        assert await client.get_version() == "1.32.3"
+        (call,) = sent(mocked, "GET", "api/host/getVersion.json")
+    assert "token" not in call.kwargs["params"]
+
+
+# -- Server health --------------------------------------------------------------
+
+
+async def test_server_info_says_if_zoneminder_is_running(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/host/getVersion\.json"), payload={"version": "1.38.1"})
+        mocked.get(v2(r"api/host/daemonCheck\.json"), payload={"result": 1})
+        mocked.get(v2(r"api/host/getVersion\.json"), payload={"version": "1.38.1"})
+        mocked.get(v2(r"api/host/daemonCheck\.json"), payload={"result": 0})
+        assert (await client.get_server_info()).running
+        assert not (await client.get_server_info()).running
+
+
+async def test_server_info_without_daemon_check(client: ZoneMinderLegacyClient) -> None:
+    """Without System rights daemonCheck fails; the version still comes back."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/host/getVersion\.json"), payload={"version": "1.38.1"})
+        mocked.get(v2(r"api/host/daemonCheck\.json"), status=500)
+        info = await client.get_server_info()
+    assert info.version == "1.38.1"
+    assert not info.running
+
+
+# -- Multi-server ---------------------------------------------------------------
+
+SERVERS_RESPONSE = {
+    "servers": [
+        {
+            "Server": {
+                "Id": "1",
+                "Name": "main",
+                "Protocol": "http",
+                "Hostname": "zm.local",
+                "Port": None,
+                "PathToIndex": "/zm/index.php",
+                "PathToZMS": "/zm/cgi-bin/nph-zms",
+            }
+        },
+        {
+            "Server": {
+                "Id": "2",
+                "Name": "garage",
+                "Protocol": "https",
+                "Hostname": "garage.local",
+                "Port": "8443",
+                "PathToIndex": "/zoneminder/index.php",
+                "PathToZMS": "/cgi-bin-zm/nph-zms",
+            }
+        },
+    ]
+}
+
+
+def _monitor_on(
+    monitor_id: int, server_id: int, *, controllable: bool = False
+) -> dict[str, Any]:
+    item = _monitor_item(monitor_id)
+    item["Monitor"]["ServerId"] = str(server_id)
+    item["Monitor"]["Controllable"] = "1" if controllable else "0"
+    return item
+
+
+async def test_streams_come_from_the_monitors_own_server(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """In a multi-server setup each camera streams from the server recording it."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [_monitor_on(1, 0), _monitor_on(2, 2), _monitor_on(3, 9)]
+            },
+        )
+        mocked.get(v2(r"api/servers\.json"), payload=SERVERS_RESPONSE)
+        await client.authenticate()
+        await client.get_monitors()
+
+    assert client.get_stream_url(1).startswith(f"{ZM}/cgi-bin/nph-zms?")
+    assert client.get_stream_url(2).startswith(
+        "https://garage.local:8443/cgi-bin-zm/nph-zms?"
+    )
+    # A server id ZoneMinder doesn't list falls back to the main server.
+    assert client.get_stream_url(3).startswith(f"{ZM}/cgi-bin/nph-zms?")
+
+
+async def test_single_server_never_asks_for_servers(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={"monitors": [_monitor_on(1, 0), _monitor_item(2)]},
+        )
+        await client.get_monitors()
+        assert not sent(mocked, "GET", "api/servers.json")
+
+
+async def test_servers_list_unavailable(client: ZoneMinderLegacyClient) -> None:
+    """Without the servers list, streams use the main server."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors\.json"), payload={"monitors": [_monitor_on(2, 2)]})
+        mocked.get(v2(r"api/servers\.json"), status=500)
+        assert [m.id for m in await client.get_monitors()] == [2]
+    assert client.get_stream_url(2).startswith(f"{ZM}/cgi-bin/nph-zms?")
+
+
+async def test_ptz_goes_to_the_monitors_own_server(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={"monitors": [_monitor_on(2, 2, controllable=True)]},
+        )
+        mocked.get(v2(r"api/servers\.json"), payload=SERVERS_RESPONSE)
+        remote = "https://garage.local:8443/zoneminder/index.php"
+        mocked.post(
+            re.compile(rf"^{re.escape(remote)}(\?.*)?$"), payload={"result": "Ok"}
+        )
+        await client.get_monitors()
+        await client.ptz(2, "up")
+        (call,) = [
+            c
+            for (verb, called), calls in mocked.requests.items()
+            if verb == "POST" and str(called).startswith(remote)
+            for c in calls
+        ]
+    assert call.kwargs["data"]["control"] == "moveConUp"
+    assert call.kwargs["params"] == {"token": "token"}
+
+
+# -- Stream scale and frame rate --------------------------------------------------
+
+
+async def test_stream_scale_and_frame_rate(session: aiohttp.ClientSession) -> None:
+    """Scaled-down, slower MJPEG saves bandwidth when viewing remotely."""
+    client = ZoneMinderLegacyClient(
+        ZM, "admin", "hunter2", session, stream_scale=50, stream_maxfps=5
+    )
+    live = client.get_stream_url(1)
+    still = client.get_stream_url(1, mode="single")
+    assert "scale=50" in live
+    assert "maxfps=5" in live
+    assert "scale=50" in still
+    # A single frame has no frame rate.
+    assert "maxfps" not in still
+
+
+async def test_default_stream_is_full_size(client: ZoneMinderLegacyClient) -> None:
+    live = client.get_stream_url(1)
+    assert "scale" not in live
+    assert "maxfps=30" in live
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+async def test_server_control(client: ZoneMinderLegacyClient, action: str) -> None:
+    """Start, stop and restart go to zmpkg.pl through the states API."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.post(v2(rf"api/states/change/{action}\.json"), payload={})
+        await client.server_control(action)
+        assert sent(mocked, "POST", f"api/states/change/{action}.json")
+
+
+async def test_server_control_rejects_other_actions(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    with pytest.raises(ValueError, match="reboot"):
+        await client.server_control("reboot")

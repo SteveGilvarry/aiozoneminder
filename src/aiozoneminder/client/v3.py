@@ -20,6 +20,7 @@ from ..const import (
     BACKEND_V3,
     DEFAULT_TIMEOUT,
     LONG_TIMEOUT,
+    PTZ_DEFAULT_SPEED,
     STREAM_TYPE_HLS,
     V3_CONFIGS,
     V3_CONTROL_PRESETS,
@@ -49,6 +50,7 @@ from ..const import (
     V3_PTZ_PRESET_GOTO,
     V3_PTZ_ZOOM,
     V3_REFRESH,
+    V3_SERVER_CONTROL,
     V3_STATE,
     V3_STATES,
     V3_STORAGE,
@@ -420,6 +422,10 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 json={"definition": definition},
             )
 
+    async def _async_server_control(self, action: str) -> None:
+        """zm-api runs systemctl, or zmcontrol.pl where there's no systemd."""
+        await self._request("POST", V3_SERVER_CONTROL.format(action=action))
+
     async def set_run_state(self, state: RunState) -> None:
         """Apply a run state the way zmpkg.pl does, then mark it active.
 
@@ -540,19 +546,27 @@ class ZoneMinderV3Client(ZoneMinderClient):
         )
 
     async def ptz(self, monitor_id: int, command: str, **kwargs: Any) -> None:
-        """Issue a PTZ command."""
+        """Issue a PTZ command.
+
+        ``speed`` (0-100) sets how fast moves, zoom and focus go.
+        """
+        speed = kwargs.get("speed", PTZ_DEFAULT_SPEED)
+        body: dict[str, Any] = {}
         if command in _PTZ_MOVE_DIRECTIONS:
             endpoint = V3_PTZ_MOVE.format(
                 monitor_id=monitor_id, direction=_PTZ_MOVE_DIRECTIONS[command]
             )
+            body = {"pan_speed": speed, "tilt_speed": speed}
         elif command in _PTZ_ZOOM_DIRECTIONS:
             endpoint = V3_PTZ_ZOOM.format(
                 monitor_id=monitor_id, direction=_PTZ_ZOOM_DIRECTIONS[command]
             )
+            body = {"speed": speed}
         elif command in _PTZ_FOCUS_DIRECTIONS:
             endpoint = V3_PTZ_FOCUS.format(
                 monitor_id=monitor_id, direction=_PTZ_FOCUS_DIRECTIONS[command]
             )
+            body = {"speed": speed}
         elif command == "home":
             endpoint = V3_PTZ_HOME.format(monitor_id=monitor_id)
         elif command == "preset":
@@ -563,7 +577,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         else:
             raise ZMNotSupportedError(f"Unsupported PTZ command: {command}")
 
-        await self._request("POST", endpoint, json={})
+        await self._request("POST", endpoint, json=body)
         _LOGGER.debug("PTZ %s sent to monitor %d", command, monitor_id)
 
     async def get_ptz_presets(self, monitor_id: int) -> dict[int, str]:

@@ -61,11 +61,14 @@ For API v2, pass `"legacy"` and ZoneMinder's web address instead, such as
 | Snapshots | Yes | Yes |
 | Switch run states | Yes | Yes |
 | Save run states | Yes | No |
-| Live status: capture rate, bandwidth, alarm state | Yes | No |
-| Event summaries (counts and disk use per monitor) | Yes | No |
+| Live status: connected, capture rate, bandwidth | Yes | Yes |
+| Event summaries (counts and disk use per monitor) | Yes | Yes |
+| Server running check | Yes | Yes, with System view rights |
 | Pushed event stream | Yes | No: poll `get_events` |
 | WebRTC playback (WHEP) | Yes | No |
 | Live video | HLS, signed RTSP links | MJPEG, or go2rtc if ZoneMinder has it |
+| Multi-server setups | Handled by zm-api | Streams and PTZ go to each camera's own server |
+| MJPEG scale and frame rate limits | Not needed | `stream_scale=`, `stream_maxfps=` |
 
 Where an API lacks a feature, reads return an empty result and actions raise
 `ZMNotSupportedError`, so the same code runs against both.
@@ -81,6 +84,14 @@ Where an API lacks a feature, reads return an empty result and actions raise
 - **Timezones.** API v2 sends times without a timezone. Pass `timezone=` to
   `create_client` to say which one ZoneMinder uses; the default is this
   machine's. API v3 times already carry one.
+- **Finding nph-zms.** Packages serve API v2's streaming CGI from different
+  places: under the web path on Debian and Ubuntu, `/cgi-bin-zm` on RPM,
+  `/cgi-bin` from source. The client finds it after logging in, or pass
+  `zms_path=` to `create_client`.
+- **PTZ speed.** Moves, zoom and focus take `speed=` (0-100, default 50).
+  ZoneMinder's control modules treat a missing speed as 0 and stop the camera.
+- **Deleted monitors.** ZoneMinder 1.38 keeps deleted monitors in the
+  database, marked deleted. `get_monitors` leaves them out on both APIs.
 - **Errors.** Everything raised derives from `ZMError`:
   `ZMConnectionError`, `ZMAuthenticationError`, `ZMApiError` (with
   `ZMNotFoundError`) and `ZMNotSupportedError`.

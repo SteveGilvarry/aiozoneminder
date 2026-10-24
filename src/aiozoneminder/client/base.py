@@ -15,7 +15,7 @@ from typing import Any
 
 import aiohttp
 
-from ..const import DEFAULT_TIMEOUT, STREAM_TYPE_MJPEG
+from ..const import DEFAULT_TIMEOUT, SERVER_ACTIONS, STREAM_TYPE_MJPEG
 from ..exceptions import ZMNotSupportedError
 from ..models import (
     Event,
@@ -231,6 +231,23 @@ class ZoneMinderClient(ABC):
     async def set_run_state(self, state: RunState) -> None:
         """Switch the server to a run state."""
         raise ZMNotSupportedError("This API cannot switch run states")
+
+    async def server_control(self, action: str) -> None:
+        """Start, stop or restart ZoneMinder itself.
+
+        Needs System edit rights. ``action`` is one of ``SERVER_ACTIONS``.
+        """
+        if action not in SERVER_ACTIONS:
+            raise ValueError(
+                f"Unknown server action {action!r}; use one of {SERVER_ACTIONS}"
+            )
+        await self._async_server_control(action)
+
+    async def _async_server_control(self, action: str) -> None:
+        """Send a validated start, stop or restart to the server."""
+        raise ZMNotSupportedError(
+            f"The {self.backend} backend can't control ZoneMinder"
+        )
 
     def get_event_media_path(self, event_id: int) -> str | None:
         """Return the relative path of an event's video."""

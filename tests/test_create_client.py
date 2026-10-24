@@ -31,3 +31,34 @@ async def test_picks_the_client(
 async def test_rejects_an_unknown_backend(session: aiohttp.ClientSession) -> None:
     with pytest.raises(ValueError, match="v4"):
         create_client("v4", "http://zm.local", "admin", "pw", session)
+
+
+async def test_zms_path_reaches_api_v2(session: aiohttp.ClientSession) -> None:
+    """API v2 streams from nph-zms; zm-api serves its own streams and ignores it."""
+    v2 = create_client(
+        BACKEND_LEGACY,
+        "http://zm.local/zm",
+        "admin",
+        "pw",
+        session,
+        zms_path="/cgi-bin-zm/nph-zms",
+    )
+    v3 = create_client(
+        BACKEND_V3, "http://zm.local:8080", "admin", "pw", session, zms_path="/x"
+    )
+    assert v2.get_stream_url(1).startswith("http://zm.local/cgi-bin-zm/nph-zms?")
+    assert type(v3) is ZoneMinderV3Client
+
+
+async def test_stream_options_reach_api_v2(session: aiohttp.ClientSession) -> None:
+    client = create_client(
+        BACKEND_LEGACY,
+        "http://zm.local/zm",
+        "admin",
+        "pw",
+        session,
+        stream_scale=50,
+        stream_maxfps=5,
+    )
+    assert "scale=50" in client.get_stream_url(1)
+    assert "maxfps=5" in client.get_stream_url(1)
