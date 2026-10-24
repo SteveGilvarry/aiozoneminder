@@ -239,6 +239,23 @@ async def test_event_times_use_the_given_timezone(
     assert events[0].start_time == datetime(2026, 10, 23, 23, 0, tzinfo=UTC)
 
 
+async def test_event_is_read_without_its_frames(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """One event's reply lists every frame unless noframes is asked for."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/events/7\.json"),
+            payload={"event": _event(7, "2026-10-24 09:00:00")},
+        )
+        event = await client.get_event(7)
+        (call,) = sent(mocked, "GET", "api/events/7.json")
+
+    assert event.id == 7
+    assert call.kwargs["params"] == {"noframes": "true", "token": "token"}
+
+
 async def test_run_states_switch_by_name(client: ZoneMinderLegacyClient) -> None:
     """API v2 applies a run state itself, so switching is one call."""
     with aioresponses() as mocked:
