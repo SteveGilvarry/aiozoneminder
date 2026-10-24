@@ -386,6 +386,8 @@ async def test_configs_and_server_info(client: ZoneMinderLegacyClient) -> None:
 
     assert configs["ZM_MQTT_TOPIC_PREFIX"] == "ZoneMinder"
     assert info.version == "1.36.33"
+    # API v2 has no daemon status, so whether ZoneMinder runs is unknown.
+    assert info.running is None
     assert info.storage == []
 
 

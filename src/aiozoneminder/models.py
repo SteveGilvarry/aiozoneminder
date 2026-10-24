@@ -549,12 +549,16 @@ class RunState:
 
 @dataclass
 class ServerInfo:
-    """Server-wide state: version, daemons and storage."""
+    """Server-wide state: version, daemons and storage.
+
+    ``running`` is None when the server did not say, for instance because the
+    user may not view system status or the API has no such report.
+    """
 
     version: str = "unknown"
     api_version: str | None = None
     db_version: str | None = None
-    running: bool = False
+    running: bool | None = None
     daemons_running: int = 0
     daemons_total: int = 0
     storage: list[StorageArea] = field(default_factory=list)

@@ -211,8 +211,34 @@ async def test_server_info_survives_missing_extras(
 
     info = await client.get_server_info()
     assert info.version == "1.39.41"
+    assert info.running is None
     assert info.daemons_total == 0
     assert info.storage == []
+
+
+async def test_server_info_without_system_view(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    # Users without the System view permission may not read daemon status.
+    register_login(mocked)
+    mocked.get(url("api/v3/host/getVersion"), payload={"version": "1.39.41"})
+    mocked.get(url("api/v3/system/status"), status=403)
+    mocked.get(url("api/v3/storage"), payload=paginated([]))
+
+    info = await client.get_server_info()
+    assert info.running is None
+    assert (info.daemons_running, info.daemons_total) == (0, 0)
+
+
+async def test_server_info_stopped(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    mocked.get(url("api/v3/host/getVersion"), payload={"version": "1.39.41"})
+    mocked.get(url("api/v3/system/status"), payload={"running": False, "daemons": []})
+    mocked.get(url("api/v3/storage"), payload=paginated([]))
+
+    assert (await client.get_server_info()).running is False
 
 
 async def test_configs(client: ZoneMinderV3Client, zm_api: aioresponses) -> None:
