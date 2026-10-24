@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import logging
 from typing import Any
 
 import aiohttp
@@ -743,6 +744,17 @@ async def test_snapshot_failure(
     register_login(mocked)
     mocked.get(url("api/v3/monitors/1/snapshot"), status=500)
     assert await client.async_get_snapshot(1) is None
+
+
+async def test_snapshot_of_a_monitor_not_capturing(
+    client: ZoneMinderV3Client,
+    mocked: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    register_login(mocked)
+    mocked.get(url("api/v3/monitors/1/snapshot"), status=404)
+    assert await client.async_get_snapshot(1) is None
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 async def test_media_is_streamed_with_the_token(
