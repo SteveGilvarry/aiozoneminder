@@ -36,9 +36,9 @@ test = [
 lint = ["mypy>=1.11", "ruff>=0.6"]
 
 [project.urls]
-Source = "https://github.com/SteveGilvarry/aiozoneminder"
-Issues = "https://github.com/SteveGilvarry/aiozoneminder/issues"
-Changelog = "https://github.com/SteveGilvarry/aiozoneminder/blob/main/CHANGELOG.md"
+Source = "https://github.com/ZoneMinder/aiozoneminder"
+Issues = "https://github.com/ZoneMinder/aiozoneminder/issues"
+Changelog = "https://github.com/ZoneMinder/aiozoneminder/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "src/aiozoneminder/__init__.py"
