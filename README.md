@@ -81,9 +81,11 @@ Where an API lacks a feature, reads return an empty result and actions raise
 - **The event stream ends** when its token expires, about every ten minutes.
   Reconnect with `since=` set to the last event id you saw, and you won't miss
   anything in between.
-- **Timezones.** API v2 sends times without a timezone. Pass `timezone=` to
-  `create_client` to say which one ZoneMinder uses; the default is this
-  machine's. API v3 times already carry one.
+- **Timezones.** API v2 sends times without a timezone. Event times are read
+  from the Unix times it sends alongside (`StartTimeSecs`, `EndTimeSecs`) and
+  given the zone passed as `timezone=` to `create_client` (the default is this
+  machine's), which is also the zone assumed when those are missing. API v3
+  times already carry one.
 - **Finding nph-zms.** Packages serve API v2's streaming CGI from different
   places: under the web path on Debian and Ubuntu, `/cgi-bin-zm` on RPM,
   `/cgi-bin` from source. The client finds it after logging in, or pass
