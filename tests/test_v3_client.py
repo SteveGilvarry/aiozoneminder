@@ -420,6 +420,39 @@ async def test_alarms(client: ZoneMinderV3Client, mocked: aioresponses) -> None:
     assert off.kwargs["json"] == {"action": "off"}
 
 
+async def test_long_alarm_cause_is_cut_to_fit(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    mocked.patch(url("api/v3/monitors/1/alarm"), payload={}, repeat=True)
+
+    await client.trigger_alarm(1, "Front door opened by the postman again")
+    # Multi-byte characters are not split.
+    await client.trigger_alarm(1, "Klingel an der Gartentür gedrückt")
+
+    first, second = calls(mocked, "PATCH", "api/v3/monitors/1/alarm")
+    assert first.kwargs["json"]["cause"] == "Front door opened by the postma"
+    assert second.kwargs["json"]["cause"] == "Klingel an der Gartentür gedr"
+
+
+async def test_refusal_carries_the_reason(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    register_login(mocked)
+    mocked.patch(
+        url("api/v3/monitors/1/alarm"),
+        status=400,
+        payload={
+            "kind": "INVALID_INPUT_ERROR",
+            "error_message": "cause: length is greater than 31\n",
+            "code": None,
+            "details": [["cause", "length is greater than 31"]],
+        },
+    )
+    with pytest.raises(ZMApiError, match=r"400: cause: length is greater than 31$"):
+        await client.trigger_alarm(1, "Doorbell")
+
+
 @pytest.mark.parametrize(
     ("command", "kwargs", "path"),
     [
