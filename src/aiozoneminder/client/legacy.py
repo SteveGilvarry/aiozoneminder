@@ -298,6 +298,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         page = 1
         while True:
             response = await self._request("GET", endpoint, params=params)
+            seen = len(events)
             for item in response.get("events") or []:
                 try:
                     event = Event.from_dict(item, self._timezone)
@@ -307,7 +308,8 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 # A new event shifts the pages, so one can be seen twice.
                 events[event.id] = event
             more = (response.get("pagination") or {}).get("nextPage")
-            if len(events) >= limit or not more:
+            # A page with nothing new (a server ignoring ``page``) ends it too.
+            if len(events) >= limit or not more or len(events) == seen:
                 break
             page += 1
             params["page"] = page

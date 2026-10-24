@@ -332,6 +332,25 @@ async def test_reads_without_v3_return_nothing(client: ZoneMinderLegacyClient) -
     assert await client.async_get_rtsp_url(1) is None
 
 
+async def test_event_paging_stops_when_pages_repeat(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A server that ignores ``page`` but says there's more doesn't loop forever."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/events\.json"),
+            payload={
+                "events": [_event(1, "2026-10-24 09:00:00")],
+                "pagination": {"nextPage": True},
+            },
+            repeat=True,
+        )
+        events = await client.get_events(limit=500)
+        assert len(sent(mocked, "GET", "api/events.json")) == 2
+    assert [e.id for e in events] == [1]
+
+
 def v2(path: str) -> re.Pattern[str]:
     """Match an API v2 endpoint whatever its query string."""
     return re.compile(rf"^{re.escape(ZM)}/{path}(\?.*)?$")
