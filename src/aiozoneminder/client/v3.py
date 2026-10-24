@@ -900,6 +900,10 @@ class ZoneMinderV3Client(ZoneMinderClient):
                     if response.status == 401 and attempt == 1:
                         await self.authenticate()
                         continue
+                    if response.status == 404:
+                        # zm-api has no frame for a monitor that isn't capturing.
+                        _LOGGER.debug("No snapshot for monitor %d", monitor_id)
+                        return None
                     response.raise_for_status()
                     return await response.read()
             except (aiohttp.ClientError, TimeoutError) as err:
