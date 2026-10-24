@@ -101,7 +101,8 @@ DECODING_OPTIONS: Final = [
     "None",
     "Ondemand",
     "KeyFrames",
-    "KeyFramesOndemand",
+    # The database value; zm-api also takes "KeyFramesOndemand" but returns this.
+    "KeyFrames+Ondemand",
     "Always",
 ]
 

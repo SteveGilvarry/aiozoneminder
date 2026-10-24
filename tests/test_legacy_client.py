@@ -17,7 +17,7 @@ from aiozoneminder import (
     ZMNotSupportedError,
     ZoneMinderLegacyClient,
 )
-from aiozoneminder.const import STREAM_TYPE_GO2RTC, STREAM_TYPE_MJPEG
+from aiozoneminder.const import DECODING_OPTIONS, STREAM_TYPE_GO2RTC, STREAM_TYPE_MJPEG
 
 ZM = "http://zm.local/zm"
 GO2RTC = "http://192.168.0.45:1984/api"
@@ -185,6 +185,21 @@ async def test_set_monitor_state_writes_both_shapes(
     # Capturing was left alone, so it keeps the monitor's current value.
     assert posted["Monitor[Capturing]"] == "Always"
     assert posted["Monitor[Function]"] == "Mocord"
+
+
+def test_decoding_options_are_zoneminder_values() -> None:
+    """Every decoding option is a value of ZoneMinder's Monitors.Decoding enum.
+
+    "KeyFramesOndemand" isn't one: API v2 answered 500, and API v3 read back
+    "KeyFrames+Ondemand", which no option matched.
+    """
+    assert DECODING_OPTIONS == [
+        "None",
+        "Ondemand",
+        "KeyFrames",
+        "KeyFrames+Ondemand",
+        "Always",
+    ]
 
 
 async def test_reauthenticates_once_on_401(client: ZoneMinderLegacyClient) -> None:
