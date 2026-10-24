@@ -56,7 +56,7 @@ For API v2, pass `"legacy"` and ZoneMinder's web address instead, such as
 |---|---|---|
 | Monitors, events, configs | Yes | Yes |
 | Change capturing, analysing, recording, decoding | Yes | Yes |
-| Trigger and cancel alarms | Yes | Yes |
+| Trigger and cancel alarms | Yes | Yes, but the event's cause is always "Forced Web" |
 | PTZ: move, zoom, focus, home, presets | Yes | Yes |
 | Snapshots | Yes | Yes |
 | Switch run states | Yes | Yes |
