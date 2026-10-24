@@ -435,9 +435,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         if function := _FUNCTION_FROM_STATE.get((capturing, analysing, recording)):
             data["Monitor[Function]"] = function
 
-        await self._request(
+        response = await self._request(
             "POST", API_MONITOR.format(monitor_id=monitor_id), data=data
         )
+        # A failed save still answers 200, with {"message": "Error ..."}.
+        message = str((response or {}).get("message") or "")
+        if message.startswith("Error"):
+            raise ZMApiError(f"Monitor {monitor_id} was not saved: {message}")
 
     # -- Run states ----------------------------------------------------------
 
@@ -516,13 +520,17 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         trigger (``ajax/trigger.php``) takes one, but needs Monitors=Edit for
         every monitor, which would refuse users who may edit only some.
         """
-        await self._request(
+        response = await self._request(
             "GET", API_ALARM_ON.format(monitor_id=monitor_id), params={"cause": cause}
         )
+        _check_alarm_reply(response, monitor_id)
 
     async def cancel_alarm(self, monitor_id: int) -> None:
         """Clear a forced alarm."""
-        await self._request("GET", API_ALARM_OFF.format(monitor_id=monitor_id))
+        response = await self._request(
+            "GET", API_ALARM_OFF.format(monitor_id=monitor_id)
+        )
+        _check_alarm_reply(response, monitor_id)
 
     async def ptz(self, monitor_id: int, command: str, **kwargs: Any) -> None:
         """Issue a PTZ command.
@@ -748,6 +756,21 @@ async def _error_message(response: aiohttp.ClientResponse) -> str | None:
     data = body.get("data")
     message = data.get("message") if isinstance(data, dict) else None
     return str(message) if message else None
+
+
+def _check_alarm_reply(response: Any, monitor_id: int) -> None:
+    """Raise when ZoneMinder's zmu failed to change a monitor's alarm.
+
+    zmu failing (the monitor isn't capturing, or runs on another server) still
+    answers 200, with ``{"status": "false", "code": <exit code>, "error": ...}``.
+    """
+    if not isinstance(response, dict) or response.get("status") != "false":
+        return
+    error = str(response.get("error") or "").strip() or "no output"
+    raise ZMApiError(
+        f"Alarm change on monitor {monitor_id} failed "
+        f"(zmu exit {response.get('code')}): {error}"
+    )
 
 
 def _parse_host(url: str) -> str | None:

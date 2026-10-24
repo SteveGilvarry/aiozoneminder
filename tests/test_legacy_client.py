@@ -491,6 +491,39 @@ async def test_alarms(client: ZoneMinderLegacyClient) -> None:
         assert sent(mocked, "GET", "api/monitors/alarm/id:1/command:off.json")
 
 
+async def test_alarm_failures_raise(client: ZoneMinderLegacyClient) -> None:
+    """zmu failing still answers 200; the error inside is raised, not dropped."""
+    failed = {
+        "status": "false",
+        "code": 255,
+        "error": "Monitor 1 is not capturing",
+    }
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors/alarm/id:1/command:on\.json"), payload=failed)
+        mocked.get(v2(r"api/monitors/alarm/id:1/command:off\.json"), payload=failed)
+        with pytest.raises(ZMApiError, match="not capturing"):
+            await client.trigger_alarm(1, "Doorbell")
+        with pytest.raises(ZMApiError, match="255"):
+            await client.cancel_alarm(1)
+
+
+async def test_failed_monitor_save_raises(client: ZoneMinderLegacyClient) -> None:
+    """A monitor save that fails answers 200 with an "Error ..." message."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors/1\.json"),
+            payload={"monitor": {"Monitor": {"Id": "1", "Name": "Driveway"}}},
+        )
+        mocked.post(
+            v2(r"api/monitors/1\.json"),
+            payload={"message": "Error Array\n(\n    [Decoding] => ...\n)\n"},
+        )
+        with pytest.raises(ZMApiError, match="not saved"):
+            await client.set_monitor_state(1, decoding="Always")
+
+
 @pytest.mark.parametrize(
     ("command", "kwargs", "expected"),
     [
