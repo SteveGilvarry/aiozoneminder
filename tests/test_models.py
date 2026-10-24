@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -116,6 +116,49 @@ def test_legacy_event_timestamp_gets_local_timezone() -> None:
     assert parsed.end_time is None
     assert parsed.in_progress is True
     assert parsed.is_alarm is True
+
+
+def test_legacy_event_prefers_unix_times() -> None:
+    """StartTimeSecs/EndTimeSecs carry no zone, so they beat the naive strings.
+
+    A ZoneMinder container on UTC and Home Assistant in New York used to shift
+    every event by the difference between the two zones.
+    """
+    new_york = timezone(timedelta(hours=-4))
+    parsed = Event.from_dict(
+        {
+            "Event": {
+                "Id": "9",
+                "MonitorId": "1",
+                # Server-local (UTC) wall time, read as New York without the epoch.
+                "StartDateTime": "2026-10-24 05:36:48",
+                "EndDateTime": "2026-10-24 05:37:00",
+                "StartTimeSecs": 1792820208,
+                "EndTimeSecs": "1792820220.50",
+            }
+        },
+        new_york,
+    )
+    assert parsed.start_time == datetime(2026, 10, 24, 5, 36, 48, tzinfo=UTC)
+    assert parsed.start_time.utcoffset() == timedelta(hours=-4)
+    assert parsed.end_time == datetime(2026, 10, 24, 5, 37, 0, 500000, tzinfo=UTC)
+
+
+def test_legacy_open_event_ignores_computed_end_secs() -> None:
+    """EndTimeSecs is computed for a running event; it must not close it."""
+    parsed = Event.from_dict(
+        {
+            "Event": {
+                "Id": "9",
+                "MonitorId": "1",
+                "StartDateTime": "2026-10-24 05:36:48",
+                "EndDateTime": None,
+                "StartTimeSecs": 1792820208,
+                "EndTimeSecs": "1792820208",
+            }
+        }
+    )
+    assert parsed.end_time is None
 
 
 def test_continuous_event_is_not_motion() -> None:

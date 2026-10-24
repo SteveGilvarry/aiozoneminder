@@ -8,7 +8,7 @@ CakePHP API responses (StudlyCaps).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 from .const import ORIENTATION_DEGREES, ORIENTATION_LABELS
@@ -33,6 +33,19 @@ def _parse_datetime(value: Any, tz: tzinfo | None = None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=tz or datetime.now().astimezone().tzinfo)
     return parsed
+
+
+def _from_epoch(value: Any, tz: tzinfo | None = None) -> datetime | None:
+    """Convert a Unix time to a ``datetime`` in ``tz``, or this machine's zone.
+
+    Returns None when the value is missing or not a number.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), UTC).astimezone(tz)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -337,21 +350,28 @@ class Event:
     def from_dict(cls, data: dict[str, Any], tz: tzinfo | None = None) -> Event:
         """Build an Event from an API v2 response.
 
-        API v2 times carry no timezone; ``tz`` says which one they're in.
+        API v2 times carry no timezone; ``tz`` says which one they're in. The
+        Unix times ``StartTimeSecs`` and ``EndTimeSecs`` need no zone, so they
+        win when the server sends them.
         """
         raw = data.get("Event", data)
-        start_time = _parse_datetime(
+        start_time = _from_epoch(raw.get("StartTimeSecs"), tz) or _parse_datetime(
             raw.get("StartTime") or raw.get("StartDateTime"), tz
         )
         if start_time is None:
             raise ValueError("Event is missing a start time")
+        end_time = _parse_datetime(raw.get("EndTime") or raw.get("EndDateTime"), tz)
+        if end_time is not None:
+            # EndTimeSecs is computed for open events too, so it only gives the
+            # value of an end the event is known to have.
+            end_time = _from_epoch(raw.get("EndTimeSecs"), tz) or end_time
         return cls(
             id=int(raw["Id"]),
             monitor_id=int(raw["MonitorId"]),
             name=raw.get("Name") or "",
             cause=raw.get("Cause") or "",
             start_time=start_time,
-            end_time=_parse_datetime(raw.get("EndTime") or raw.get("EndDateTime"), tz),
+            end_time=end_time,
             length=_to_float(raw.get("Length")),
             frames=_to_int(raw.get("Frames")),
             alarm_frames=_to_int(raw.get("AlarmFrames")),
