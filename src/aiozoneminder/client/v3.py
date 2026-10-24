@@ -412,8 +412,11 @@ class ZoneMinderV3Client(ZoneMinderClient):
         states = await self.get_run_states()
         existing = next((s for s in states if s.name == name), None)
         if existing is None:
+            # zm-api requires is_active on create; a saved state starts inactive.
             await self._request(
-                "POST", V3_STATES, json={"name": name, "definition": definition}
+                "POST",
+                V3_STATES,
+                json={"name": name, "definition": definition, "is_active": 0},
             )
         else:
             await self._request(
