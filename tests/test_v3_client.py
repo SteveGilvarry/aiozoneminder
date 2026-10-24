@@ -135,14 +135,45 @@ async def test_failed_refresh_logs_in_again(
     assert len(calls(mocked, "POST", "api/v3/auth/login")) == 2
 
 
-async def test_two_rejections_give_up(
-    client: ZoneMinderV3Client, mocked: aioresponses
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the client's sleeps instead of waiting."""
+    delays: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("aiozoneminder.client.v3.asyncio.sleep", _sleep)
+    return delays
+
+
+async def test_three_rejections_give_up(
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
 ) -> None:
     register_login(mocked)
     mocked.get(url("api/v3/host/getVersion"), status=401, repeat=True)
     mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
     with pytest.raises(ZMAuthenticationError):
         await client.get_version()
+    assert len(calls(mocked, "GET", "api/v3/host/getVersion")) == 3
+    assert slept == [1.0]
+
+
+async def test_token_renewed_in_the_logout_second_is_renewed_again(
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
+) -> None:
+    # A logout elsewhere revokes tokens issued before the next second, so the
+    # token from the first re-login is refused too.
+    register_login(mocked)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
+    mocked.get(url("api/v3/host/getVersion"), status=401)
+    mocked.get(url("api/v3/host/getVersion"), status=401)
+    mocked.get(url("api/v3/host/getVersion"), payload={"version": "1.39.41"})
+
+    assert await client.get_version() == "1.39.41"
+    assert slept == [1.0]
+    # The first login, one after each refusal.
+    assert len(calls(mocked, "POST", "api/v3/auth/login")) == 3
 
 
 async def test_token_near_expiry_is_refreshed_first(
@@ -647,16 +678,17 @@ async def test_server_without_an_event_stream(
 
 
 async def test_event_stream_refused(
-    client: ZoneMinderV3Client, mocked: aioresponses
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
 ) -> None:
     register_login(mocked)
     mocked.get(url("api/v3/events/stream"), status=401, repeat=True)
-    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
     with pytest.raises(ZMAuthenticationError):
         async for _message in client.async_event_stream():
             pass
-    # The token was renewed and the stream asked for once more.
-    assert len(calls(mocked, "GET", "api/v3/events/stream")) == 2
+    # Renewed, asked again, then renewed once more after the logout second.
+    assert len(calls(mocked, "GET", "api/v3/events/stream")) == 3
+    assert slept == [1.0]
 
 
 async def test_event_stream_after_the_token_is_revoked(
@@ -934,16 +966,34 @@ async def test_media_after_the_token_is_revoked(
 
 
 async def test_media_refused_twice_is_passed_on(
-    client: ZoneMinderV3Client, mocked: aioresponses
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
 ) -> None:
     register_login(mocked)
-    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
     path = client.get_event_media_path(298)
     mocked.get(url(path), status=401, repeat=True)
 
     async with client.async_stream_media(path) as resp:
         assert resp.status == 401
-    assert len(calls(mocked, "GET", path)) == 2
+    assert len(calls(mocked, "GET", path)) == 3
+    assert slept == [1.0]
+
+
+async def test_media_in_the_logout_second_is_renewed_again(
+    client: ZoneMinderV3Client, mocked: aioresponses, slept: list[float]
+) -> None:
+    # The token renewed in the logout's second is refused too; after the wait
+    # a second renewal gets through.
+    register_login(mocked)
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=401, repeat=True)
+    path = client.get_event_media_path(298)
+    mocked.get(url(path), status=401)
+    mocked.get(url(path), status=401)
+    mocked.get(url(path), status=206, body=b"ftyp")
+
+    async with client.async_stream_media(path) as resp:
+        assert resp.status == 206
+    assert slept == [1.0]
 
 
 def test_media_paths(client: ZoneMinderV3Client) -> None:
