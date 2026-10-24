@@ -312,7 +312,8 @@ class ZoneMinderV3Client(ZoneMinderClient):
         try:
             status = await self._request("GET", V3_SYSTEM_STATUS)
             daemons = status.get("daemons") or []
-            info.running = bool(status.get("running"))
+            running = status.get("running")
+            info.running = running if isinstance(running, bool) else None
             info.daemons_total = len(daemons)
             info.daemons_running = sum(
                 1 for d in daemons if d.get("state") == "running"
